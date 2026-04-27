@@ -1,0 +1,37 @@
+[gd_scene load_steps=8 format=3 uid="uid://cb6jqv2k0hh8y"]
+
+[ext_resource type="Script" path="res://scripts/game.gd" id="1_nw2x2"]
+[ext_resource type="Script" path="res://scripts/grid.gd" id="2_1h0cn"]
+[ext_resource type="Script" path="res://scripts/turn_manager.gd" id="3_eyh5h"]
+[ext_resource type="Script" path="res://scripts/pathfinder.gd" id="4_hnawu"]
+[ext_resource type="Script" path="res://scripts/game_flow.gd" id="5_0j1yy"]
+[ext_resource type="Script" path="res://scripts/world_map.gd" id="6_veq2f"]
+[ext_resource type="Script" path="res://scripts/ship_battle.gd" id="7_n3vc2"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_nw2x2")
+
+[node name="Grid" type="Node2D" parent="."]
+position = Vector2(80, 80)
+script = ExtResource("2_1h0cn")
+
+[node name="Units" type="Node2D" parent="."]
+
+[node name="TurnManager" type="Node" parent="."]
+script = ExtResource("3_eyh5h")
+
+[node name="Pathfinder" type="Node" parent="."]
+script = ExtResource("4_hnawu")
+
+[node name="GameFlow" type="Node" parent="."]
+script = ExtResource("5_0j1yy")
+
+[node name="WorldMap" type="Node2D" parent="."]
+script = ExtResource("6_veq2f")
+
+[node name="ShipBattle" type="Node" parent="."]
+script = ExtResource("7_n3vc2")
+
+[node name="Camera2D" type="Camera2D" parent="."]
+position = Vector2(960, 540)
+zoom = Vector2(1, 1)

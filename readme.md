@@ -68,3 +68,34 @@ It also includes an auto-travel Caribbean world map inspired by `Sid Meier's Pir
 - Add cannon arcs, range bands, sail state, and wind in ship combat.
 - Build dedicated town assault maps with defenders and objective points.
 - Persist campaign state (fleet, cargo, crew morale, reputation, ports).
+
+
+## 4/29 notes:
+Still called out in readme (or only prototype)
+Boarding: more than one objective type (not only helm-style control).
+Ship combat: cannon arcs / range bands, sail state, and wind wired into naval turns the way they are for the world map (readme still lists this).
+Town assault: real maps, defender setups, and objectives—not just a demo entry from the port flow.
+Docs: refresh readme so “Next steps” matches what’s shipped (save, career, politics, etc.).
+Classic “Pirates!” depth you don’t have yet
+Strategic layer: multiple ships / fleet, prizes, repairs, crew splits, clearer loot from naval wins feeding the economy.
+Living world: your slow wars are a start; still light on missions (escort, blockade, hunt X), smuggling, and time-limited port prices or shortages.
+Character: duels, tavern games, rank with nations beyond a rep number, named rivals.
+Exploration: discoveries that aren’t only port + scripted treasure/family beats.
+Presentation & feel
+Art/audio: port “illustration” placeholders, no systematic SFX/music called out in repo.
+Onboarding: one guided run through sail → encounter → dock → trade would help; systems are dense.
+Polish / accessibility
+Rebinds, UI scale, colorblind-safe route/wind/faction colors, save slots if you stay single-file save.
+Bottom line
+You have a strong vertical slice: map + wind + politics skeleton + naval/boarding/town hooks + career loop + save. What’s missing most for a “full game” feel is deeper naval and town content, richer economy and missions, and presentation/onboarding—not more core modes.
+
+
+## CC Assets
+Scallywag Ships from Foozle
+https://foozlecc.itch.io/scallywag-ships
+
+Scallywag Pirates from Foozle
+https://foozlecc.itch.io/scallywag-pirates
+
+3D Stylized Pirate Island Props Pack
+https://adobemano.itch.io/3d-stylized-pirate-island-props-pack

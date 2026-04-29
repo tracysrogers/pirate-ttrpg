@@ -17,6 +17,7 @@ var boarding_objective_cell: Vector2i = Vector2i(7, 4)
 var boarding_gangplank_cells: Array[Vector2i] = [Vector2i(5, 4), Vector2i(6, 4)]
 var boarding_obstacle_cells: Array[Vector2i] = []
 var boarding_chokepoint_cells: Array[Vector2i] = []
+var boarding_deck_cells: Array[Vector2i] = []
 var boarding_attacker_spawn_cells: Array[Vector2i] = []
 var boarding_defender_spawn_cells: Array[Vector2i] = []
 var boarding_defender_hold_turns_required: int = 3
@@ -31,6 +32,15 @@ var captain_log_title_label: Label
 var captain_log_text_label: Label
 var left_sidebar_layer: CanvasLayer
 var left_sidebar_panel: ColorRect
+var left_sidebar_menu_box: VBoxContainer
+var main_map_info_layer: CanvasLayer
+var main_map_info_overlay: ColorRect
+var main_map_info_panel: PanelContainer
+var main_map_info_title_label: Label
+var main_map_info_text_label: Label
+var main_map_info_close_button: Button
+var main_map_info_x_button: Button
+var retirement_pending_return_to_menu: bool = false
 var time_controls_layer: CanvasLayer
 var time_controls_box: HBoxContainer
 var time_buttons: Dictionary = {}
@@ -51,6 +61,46 @@ var encounter_engage_button: Button
 var encounter_pursue_button: Button
 var pending_encounter: Dictionary = {}
 var encounter_active: bool = false
+var last_ship_battle_enemy_faction: String = ""
+var last_ship_battle_player_aggressor: bool = false
+var port_menu_layer: CanvasLayer
+var port_menu_panel: PanelContainer
+var port_menu_title_label: Label
+var port_menu_info_label: Label
+var port_menu_status_label: Label
+var port_menu_image_rect: ColorRect
+var port_menu_image_label: Label
+var port_menu_close_button: Button
+var port_menu_primary_button: Button
+var port_menu_secondary_button: Button
+var port_menu_tertiary_button: Button
+var port_menu_quaternary_button: Button
+var port_menu_quinary_button: Button
+var port_menu_active: bool = false
+var port_menu_docked: bool = false
+var current_port_menu_port: String = ""
+var port_menu_screen: String = "arrival"
+var cargo_manifest: Dictionary = {}
+var player_piasters: int = 1800
+var ship_supplies: int = 40
+var ship_cargo: int = 18
+var crew_roster_size: int = 42
+var governor_favor: int = 0
+var active_governor_task: String = ""
+var career_state: Dictionary = {}
+var port_trade_panel: VBoxContainer
+var port_trade_supply_slider: HSlider
+var port_trade_supply_value_label: Label
+var port_trade_total_label: Label
+var port_trade_buy_button: Button
+var port_trade_cancel_button: Button
+var port_trade_cargo_rows: Array = []
+var port_hire_panel: VBoxContainer
+var port_hire_slider: HSlider
+var port_hire_value_label: Label
+var port_hire_cost_label: Label
+var port_hire_confirm_button: Button
+var port_hire_cancel_button: Button
 var ship_move_selected_cell: Vector2i = Vector2i(-1, -1)
 var ship_combat_selected_action: int = 0
 var ship_end_turn_confirm_open: bool = false
@@ -73,10 +123,12 @@ var boarding_selected_action: int = 0
 var boarding_unit_labels: Dictionary = {}
 var boarding_actor_moved: bool = false
 var boarding_actor_attacked: bool = false
+var crew_officers: Array[Dictionary] = []
+var boarding_party_roster: Array[Dictionary] = []
 
-const UI_BASE_SIDEBAR_WIDTH := 96.0
-const UI_MIN_SIDEBAR_WIDTH := 84.0
-const UI_MAX_SIDEBAR_WIDTH := 120.0
+const UI_BASE_SIDEBAR_WIDTH := 190.0
+const UI_MIN_SIDEBAR_WIDTH := 170.0
+const UI_MAX_SIDEBAR_WIDTH := 220.0
 const UI_BASE_LOG_HEIGHT := 220.0
 const UI_MIN_LOG_HEIGHT := 140.0
 const UI_MAX_LOG_HEIGHT := 240.0
@@ -105,21 +157,79 @@ const BOARDING_ACTION_MOVE := 0
 const BOARDING_ACTION_RANGED := 1
 const BOARDING_ACTION_MELEE := 2
 const CREW_CARD_LABELS := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const CareerSystemScript := preload("res://scripts/career_system.gd")
+const SUPPLY_UNIT_COST := 6
+const RECRUIT_COST := 45
+const FACTION_LIST := ["Spanish", "English", "French", "Dutch"]
+const WORLD_POLITICS_INTERVAL_MONTHS := 5
+const PORT_EXPORT_CARGO := {
+	"Havana": ["Tobacco", "Sugar", "Molasses", "Citrus"],
+	"Nassau": ["Salted Fish", "Timber", "Turtle Shell", "Rum"],
+	"Port Royal": ["Sugar", "Rum", "Indigo", "Pimento"],
+	"Tortuga": ["Coffee", "Hides", "Sugar", "Timber"],
+	"Cartagena": ["Silver", "Cacao", "Tobacco", "Dye Wood"],
+	"Santo Domingo": ["Sugar", "Coffee", "Cacao", "Cotton"],
+	"Veracruz": ["Silver", "Cochineal", "Vanilla", "Tobacco"],
+	"Portobelo": ["Silver", "Dyewood", "Cacao", "Pearls"],
+	"San Juan": ["Sugar", "Ginger", "Hides", "Coffee"],
+	"Campeche": ["Dyewood", "Salt", "Hides", "Cacao"],
+	"Maracaibo": ["Cacao", "Hides", "Coffee", "Indigo"],
+	"Willemstad": ["Salt", "Aloe", "Sugar", "Transit Goods"],
+	"Santiago de Cuba": ["Copper", "Sugar", "Tobacco", "Coffee"],
+	"Port-au-Prince": ["Sugar", "Coffee", "Indigo", "Cotton"],
+	"Bridgetown": ["Sugar", "Rum", "Cotton", "Ginger"],
+	"St. Pierre": ["Sugar", "Coffee", "Cocoa", "Rum"],
+	"Basse-Terre": ["Sugar", "Coffee", "Cacao", "Timber"],
+	"La Guaira": ["Cacao", "Coffee", "Indigo", "Hides"],
+	"St. Augustine": ["Timber", "Hides", "Indigo", "Naval Stores"]
+}
+const CARGO_UNIT_COST := {
+	"Sugar": 14,
+	"Molasses": 11,
+	"Rum": 19,
+	"Tobacco": 22,
+	"Coffee": 20,
+	"Cacao": 23,
+	"Cotton": 16,
+	"Indigo": 25,
+	"Silver": 44,
+	"Cochineal": 38,
+	"Vanilla": 33,
+	"Dyewood": 21,
+	"Dye Wood": 21,
+	"Ginger": 18,
+	"Citrus": 10,
+	"Hides": 17,
+	"Timber": 12,
+	"Salt": 9,
+	"Pearls": 36,
+	"Copper": 28,
+	"Aloe": 15,
+	"Turtle Shell": 24,
+	"Salted Fish": 10,
+	"Naval Stores": 18,
+	"Transit Goods": 20,
+	"Pimento": 16
+}
 
 func _ready() -> void:
 	randomize()
+	_reset_career_state()
 	last_viewport_size = get_viewport_rect().size
 	_sync_camera_to_viewport()
 	_setup_left_sidebar_ui()
 	_setup_captains_log_ui()
+	_setup_main_map_info_ui()
 	_setup_time_controls_ui()
 	_setup_encounter_ui()
+	_setup_port_menu_ui()
 	_setup_escape_menu_ui()
 	_setup_main_menu_ui()
 	game_flow.mode_changed.connect(_on_mode_changed)
 	game_flow.message_posted.connect(_on_message_posted)
 	world_map.destination_arrived.connect(_on_destination_arrived)
 	world_map.random_encounter_triggered.connect(_on_random_encounter)
+	world_map.game_month_advanced.connect(_on_world_map_month_advanced)
 	ship_battle.battle_updated.connect(_on_ship_battle_updated)
 	ship_battle.boarding_started.connect(_on_boarding_started)
 	ship_battle.battle_finished.connect(_on_ship_battle_finished)
@@ -136,8 +246,11 @@ func _process(_delta: float) -> void:
 		_sync_camera_to_viewport()
 		_layout_worldmap_ui()
 		_layout_tactical_ui()
-	# Keep HUD overlays responsive to combat state changes.
-	queue_redraw()
+	# Ship combat / boarding HUD draws on this node; skip redundant invalidates on world map.
+	if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT or (
+		game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT and game_flow.tactical_type == GameFlow.TacticalType.BOARDING
+	):
+		queue_redraw()
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_SIZE_CHANGED:
@@ -214,6 +327,8 @@ func _draw() -> void:
 			var sel_text := "Selected: (%d,%d)  Press Enter to move" % [ship_move_selected_cell.x, ship_move_selected_cell.y]
 			draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 130.0), sel_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 18)
 	elif game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT and game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+		_draw_boarding_deck_surface()
+		_draw_boarding_units_overlay()
 		_draw_boarding_crew_cards()
 		var panel_rect: Rect2 = _boarding_action_panel_rect()
 		_draw_boarding_action_panel(panel_rect)
@@ -225,6 +340,16 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		var key_event: InputEventKey = event
 		if key_event.pressed and not key_event.echo and key_event.keycode == KEY_ESCAPE:
+			if port_menu_active:
+				_close_port_menu()
+				game_flow.post_message("Port menu closed.")
+				get_viewport().set_input_as_handled()
+				return
+			if main_map_info_layer != null and main_map_info_layer.visible:
+				_close_main_map_info()
+				game_flow.post_message("Info panel closed.")
+				get_viewport().set_input_as_handled()
+				return
 			if is_escape_menu_open:
 				_close_escape_menu()
 			else:
@@ -236,6 +361,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 
 	if encounter_active:
+		return
+
+	if port_menu_active:
+		return
+
+	if main_map_info_layer != null and main_map_info_layer.visible:
 		return
 
 	if game_flow.current_mode == GameFlow.Mode.WORLD_MAP and world_map.handle_input(event):
@@ -378,11 +509,19 @@ func _spawn_units_from_cells(team: Unit.Team, cells: Array[Vector2i]) -> void:
 func _handle_world_map_click(world_pos: Vector2) -> void:
 	var local_pos := world_map.to_local(world_pos)
 	var port_name := world_map.pick_port_from_click(local_pos)
-	if port_name == "":
+	if port_name != "":
+		if world_map.set_target_port(port_name):
+			can_start_town_assault = false
+			game_flow.post_message("Sailing automatically toward %s." % port_name)
 		return
-	if world_map.set_target_port(port_name):
+	if not world_map.is_click_on_map(local_pos):
+		return
+	var click_world := world_map.get_world_from_map_click(local_pos)
+	if world_map.set_sail_to_world(click_world):
 		can_start_town_assault = false
-		game_flow.post_message("Sailing automatically toward %s." % port_name)
+		game_flow.post_message("Course set for open water.")
+	else:
+		game_flow.post_message("No sea route to that point.")
 
 func _handle_tactical_click(world_pos: Vector2) -> void:
 	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
@@ -406,6 +545,9 @@ func _handle_tactical_click(world_pos: Vector2) -> void:
 	var local_pos := grid.to_local(world_pos)
 	var clicked_cell := grid.local_to_cell(local_pos)
 	if not grid.is_in_bounds(clicked_cell):
+		_clear_selection()
+		return
+	if not grid.is_cell_on_deck(clicked_cell):
 		_clear_selection()
 		return
 	if grid.is_cell_blocked(clicked_cell):
@@ -547,6 +689,12 @@ func _get_unit_at(cell: Vector2i) -> Unit:
 
 func _blocked_cells_for(active_unit: Unit) -> Dictionary:
 	var blocked := {}
+	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+		for x in range(grid.width):
+			for y in range(grid.height):
+				var deck_cell := Vector2i(x, y)
+				if not grid.is_cell_on_deck(deck_cell):
+					blocked[deck_cell] = true
 	for cell in boarding_obstacle_cells:
 		blocked[cell] = true
 	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
@@ -579,6 +727,10 @@ func _on_mode_changed(new_mode: int) -> void:
 	grid.visible = tactical_visible
 	units_root.visible = tactical_visible
 	world_map.visible = new_mode == GameFlow.Mode.WORLD_MAP
+	if port_menu_layer != null:
+		port_menu_layer.visible = new_mode == GameFlow.Mode.WORLD_MAP and port_menu_active
+	if main_map_info_layer != null and new_mode != GameFlow.Mode.WORLD_MAP:
+		main_map_info_layer.visible = false
 	if new_mode == GameFlow.Mode.SHIP_COMBAT:
 		ship_combat_selected_action = SHIP_ACTION_MOVE
 		ship_end_turn_confirm_open = false
@@ -599,9 +751,18 @@ func _on_message_posted(text: String) -> void:
 	_refresh_captains_log_ui()
 
 func _on_destination_arrived(port_name: String) -> void:
-	last_arrived_port = port_name
-	can_start_town_assault = true
-	game_flow.post_message("Arrived at %s. Press T here to start a town assault scenario soon." % port_name)
+	_update_aging_and_career_pressure()
+	if port_name != "":
+		last_arrived_port = port_name
+		can_start_town_assault = false
+		_open_port_arrival_menu(port_name)
+		if _can_launch_treasure_at_port(port_name):
+			game_flow.post_message("The assembled chart marks hidden treasure near %s." % port_name)
+		game_flow.post_message("Arrived off %s. Choose your approach." % port_name)
+	else:
+		last_arrived_port = ""
+		can_start_town_assault = false
+		game_flow.post_message("You have reached your plotted position.")
 
 func _on_random_encounter() -> void:
 	can_start_town_assault = false
@@ -631,10 +792,18 @@ func _on_boarding_started(attacker_is_player: bool) -> void:
 		game_flow.post_message("Defend your %s deck for 3 rounds or eliminate boarders." % current_boarding_template_name)
 
 func _on_ship_battle_finished(player_won: bool) -> void:
+	var enemy_faction_snapshot := last_ship_battle_enemy_faction
+	var was_aggressor_snapshot := last_ship_battle_player_aggressor
+	_apply_ship_battle_faction_reputation(player_won)
+	_try_progress_governor_mission_naval_win(player_won, enemy_faction_snapshot, was_aggressor_snapshot)
 	if player_won:
+		_award_career_fame(32, "Naval victory")
+		_try_award_map_fragment(0.34, "Recovered complete treasure map from a defeated pirate captain")
 		game_flow.post_message("Naval battle won. Back to Caribbean map.")
 	else:
 		game_flow.post_message("Your ship is beaten. Retreating to world map.")
+	last_ship_battle_enemy_faction = ""
+	last_ship_battle_player_aggressor = false
 	_set_mode(GameFlow.Mode.WORLD_MAP)
 
 func _resolve_enemy_ship_turn_if_needed() -> void:
@@ -644,6 +813,18 @@ func _resolve_enemy_ship_turn_if_needed() -> void:
 		ship_battle.enemy_take_turn()
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventKey:
+		var key_event: InputEventKey = event
+		if key_event.pressed and not key_event.echo and key_event.keycode == KEY_ESCAPE:
+			if main_map_info_layer != null and main_map_info_layer.visible:
+				_close_main_map_info()
+				game_flow.post_message("Info panel closed.")
+				get_viewport().set_input_as_handled()
+				return
+
+	if port_menu_active:
+		return
+
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_T:
 		if game_flow.current_mode == GameFlow.Mode.WORLD_MAP and can_start_town_assault:
 			_start_town_assault_demo()
@@ -944,6 +1125,11 @@ func _handle_tactical_finished(player_side_successful: bool) -> void:
 		return
 
 	if player_side_successful:
+		var treasure_in_progress := bool(career_state.get("treasure_in_progress", false))
+		if treasure_in_progress:
+			_resolve_treasure_expedition_success()
+		_award_career_fame(44, "Town assault victory")
+		_advance_family_rescue_progress("Town assault intelligence recovered.")
 		game_flow.post_message("Town assault won. Returning to Caribbean travel.")
 	else:
 		game_flow.post_message("Town assault failed. Returning to Caribbean travel.")
@@ -1018,7 +1204,11 @@ func _resolve_spawn_cell(preferred: Vector2i) -> Vector2i:
 func _is_spawnable_cell(cell: Vector2i) -> bool:
 	if not grid.is_in_bounds(cell):
 		return false
+	if not grid.is_cell_on_deck(cell):
+		return false
 	if grid.is_cell_blocked(cell):
+		return false
+	if boarding_chokepoint_cells.has(cell):
 		return false
 	return _get_unit_at(cell) == null
 
@@ -1042,34 +1232,64 @@ func _nearest_valid_cell(origin: Vector2i) -> Vector2i:
 	return candidates[0]
 
 func _configure_boarding_layout() -> void:
-	# First boarding prototype: 20-yard sloop deck with 1-yard tiles.
-	grid.width = 20
-	grid.height = 8
-	current_boarding_template_name = "20-yard sloop"
-	boarding_objective_cell = Vector2i(16, 4)
-	boarding_gangplank_cells = [Vector2i(3, 3), Vector2i(3, 4)]
-	boarding_chokepoint_cells = [Vector2i(7, 3), Vector2i(7, 4), Vector2i(8, 3), Vector2i(8, 4)]
+	# Sloop upper deck: 1-yard tactical cells, no sail surfaces, masts act as cover.
+	grid.width = 25
+	grid.height = 7
+	current_boarding_template_name = "25-yard sloop upper deck"
+	boarding_deck_cells = _sloop_upper_deck_cells()
+	boarding_objective_cell = Vector2i(22, 3)
+	boarding_gangplank_cells = [Vector2i(5, 0), Vector2i(5, 6)]
+	boarding_chokepoint_cells = [Vector2i(13, 3)]
 	boarding_obstacle_cells = [
-		Vector2i(6, 2), Vector2i(6, 5), # foremast
-		Vector2i(12, 2), Vector2i(12, 5), # mainmast
-		Vector2i(15, 1), Vector2i(16, 1), Vector2i(17, 1),
-		Vector2i(15, 2), Vector2i(16, 2), Vector2i(17, 2) # stern cabin
+		Vector2i(9, 3), # mainmast
+		Vector2i(16, 3), # foremast
+		Vector2i(2, 2), Vector2i(2, 4), # stern rail/cargo
+		Vector2i(18, 1), Vector2i(19, 1),
+		Vector2i(18, 5), Vector2i(19, 5), # hatch coamings
+		Vector2i(21, 2), Vector2i(21, 4) # foredeck rigging
 	]
-	boarding_attacker_spawn_cells = [Vector2i(1, 2), Vector2i(1, 4), Vector2i(2, 3), Vector2i(2, 5)]
-	boarding_defender_spawn_cells = [Vector2i(18, 2), Vector2i(18, 4), Vector2i(17, 3), Vector2i(17, 5)]
+	boarding_attacker_spawn_cells = [Vector2i(3, 2), Vector2i(3, 4), Vector2i(4, 3), Vector2i(5, 2)]
+	boarding_defender_spawn_cells = [Vector2i(20, 3), Vector2i(21, 3), Vector2i(20, 2), Vector2i(20, 4)]
 
+	grid.set_deck_cells(boarding_deck_cells)
 	grid.set_blocked_cells(boarding_obstacle_cells)
 	grid.set_gangplank_cells(boarding_gangplank_cells)
 	grid.set_objective_cells([boarding_objective_cell])
 	grid.set_chokepoint_cells(boarding_chokepoint_cells)
+
+func _sloop_upper_deck_cells() -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+	for x in range(25):
+		var min_y := 0
+		var max_y := 6
+		if x == 0:
+			min_y = 2
+			max_y = 4
+		elif x <= 2:
+			min_y = 1
+			max_y = 5
+		elif x >= 24:
+			min_y = 3
+			max_y = 3
+		elif x >= 22:
+			min_y = 2
+			max_y = 4
+		elif x >= 20:
+			min_y = 1
+			max_y = 5
+		for y in range(min_y, max_y + 1):
+			cells.append(Vector2i(x, y))
+	return cells
 
 func _clear_special_tactical_layout() -> void:
 	grid.width = 14
 	grid.height = 10
 	boarding_obstacle_cells.clear()
 	boarding_chokepoint_cells.clear()
+	boarding_deck_cells.clear()
 	boarding_attacker_spawn_cells.clear()
 	boarding_defender_spawn_cells.clear()
+	grid.set_deck_cells([])
 	grid.set_blocked_cells([])
 	grid.set_gangplank_cells([])
 	grid.set_objective_cells([])
@@ -1081,6 +1301,8 @@ func _manhattan(a: Vector2i, b: Vector2i) -> int:
 func _first_los_blocker(from_cell: Vector2i, to_cell: Vector2i) -> Vector2i:
 	var line_cells: Array[Vector2i] = _line_cells_between(from_cell, to_cell)
 	for cell in line_cells:
+		if game_flow.tactical_type == GameFlow.TacticalType.BOARDING and not grid.is_cell_on_deck(cell):
+			return cell
 		if boarding_obstacle_cells.has(cell):
 			return cell
 		var blocker: Unit = _get_unit_at(cell)
@@ -1136,16 +1358,16 @@ func _to_vector2i_array(value: Variant) -> Array[Vector2i]:
 	return result
 
 func _draw_ship_silhouette(center: Vector2, ship_class: String, heading_deg: float, hull_color: Color) -> void:
-	var scale: float = _ship_draw_scale(ship_class)
+	var draw_scale: float = _ship_draw_scale(ship_class)
 	var heading_rad: float = deg_to_rad(90.0 - heading_deg)
 	var basis := Transform2D(heading_rad, center)
 	var hull_local := PackedVector2Array([
-		Vector2(-130.0 * scale, 18.0 * scale),
-		Vector2(-72.0 * scale, -8.0 * scale),
-		Vector2(70.0 * scale, -10.0 * scale),
-		Vector2(132.0 * scale, 6.0 * scale),
-		Vector2(96.0 * scale, 36.0 * scale),
-		Vector2(-94.0 * scale, 38.0 * scale)
+		Vector2(-130.0 * draw_scale, 18.0 * draw_scale),
+		Vector2(-72.0 * draw_scale, -8.0 * draw_scale),
+		Vector2(70.0 * draw_scale, -10.0 * draw_scale),
+		Vector2(132.0 * draw_scale, 6.0 * draw_scale),
+		Vector2(96.0 * draw_scale, 36.0 * draw_scale),
+		Vector2(-94.0 * draw_scale, 38.0 * draw_scale)
 	])
 	var hull := PackedVector2Array()
 	for p in hull_local:
@@ -1153,33 +1375,33 @@ func _draw_ship_silhouette(center: Vector2, ship_class: String, heading_deg: flo
 	draw_colored_polygon(hull, hull_color)
 	draw_polyline(hull, Color(0.18, 0.12, 0.07), 2.0, true)
 
-	var mast1_x: float = -30.0 * scale
-	var mast2_x: float = 34.0 * scale
-	var mast_height_1: float = 110.0 * scale
-	var mast_height_2: float = 82.0 * scale
-	draw_line(basis * Vector2(mast1_x, 18.0 * scale), basis * Vector2(mast1_x, -mast_height_1), Color(0.86, 0.8, 0.65), 3.0)
-	draw_line(basis * Vector2(mast2_x, 20.0 * scale), basis * Vector2(mast2_x, -mast_height_2), Color(0.86, 0.8, 0.65), 3.0)
+	var mast1_x: float = -30.0 * draw_scale
+	var mast2_x: float = 34.0 * draw_scale
+	var mast_height_1: float = 110.0 * draw_scale
+	var mast_height_2: float = 82.0 * draw_scale
+	draw_line(basis * Vector2(mast1_x, 18.0 * draw_scale), basis * Vector2(mast1_x, -mast_height_1), Color(0.86, 0.8, 0.65), 3.0)
+	draw_line(basis * Vector2(mast2_x, 20.0 * draw_scale), basis * Vector2(mast2_x, -mast_height_2), Color(0.86, 0.8, 0.65), 3.0)
 
 	var sail_color := Color(0.9, 0.89, 0.82, 0.9)
 	var fore_sail := PackedVector2Array([
-		basis * Vector2(mast2_x, -74.0 * scale),
-		basis * Vector2(mast2_x + 50.0, -34.0 * scale),
-		basis * Vector2(mast2_x, -22.0 * scale)
+		basis * Vector2(mast2_x, -74.0 * draw_scale),
+		basis * Vector2(mast2_x + 50.0, -34.0 * draw_scale),
+		basis * Vector2(mast2_x, -22.0 * draw_scale)
 	])
 	var main_sail := PackedVector2Array([
-		basis * Vector2(mast1_x, -96.0 * scale),
-		basis * Vector2(mast1_x + 68.0, -48.0 * scale),
-		basis * Vector2(mast1_x, -18.0 * scale)
+		basis * Vector2(mast1_x, -96.0 * draw_scale),
+		basis * Vector2(mast1_x + 68.0, -48.0 * draw_scale),
+		basis * Vector2(mast1_x, -18.0 * draw_scale)
 	])
 	draw_colored_polygon(fore_sail, sail_color)
 	draw_colored_polygon(main_sail, sail_color)
 
 	# Gun ports hint broadside strength by ship class.
-	var gun_count: int = int(round(4.0 + scale * 5.0))
+	var gun_count: int = int(round(4.0 + draw_scale * 5.0))
 	for i in range(gun_count):
 		var t: float = float(i + 1) / float(gun_count + 1)
-		var px: float = lerpf(-90.0 * scale, 88.0 * scale, t)
-		draw_circle(basis * Vector2(px, 20.0 * scale), 2.5, Color(0.1, 0.1, 0.1))
+		var px: float = lerpf(-90.0 * draw_scale, 88.0 * draw_scale, t)
+		draw_circle(basis * Vector2(px, 20.0 * draw_scale), 2.5, Color(0.1, 0.1, 0.1))
 
 func _combat_to_screen(point: Vector2, combat_rect: Rect2, cols: int, rows: int) -> Vector2:
 	if cols <= 0 or rows <= 0:
@@ -1347,6 +1569,70 @@ func _boarding_action_button_rect(panel_rect: Rect2, action_id: int) -> Rect2:
 		panel_rect.position + Vector2(12.0, 40.0 + float(action_id) * 48.0),
 		Vector2(panel_rect.size.x - 24.0, 36.0)
 	)
+
+func _draw_boarding_deck_surface() -> void:
+	if grid == null:
+		return
+	var tile := float(grid.tile_size)
+	var board_rect := Rect2(grid.position, Vector2(float(grid.width) * tile, float(grid.height) * tile))
+	draw_rect(board_rect, Color(0.04, 0.08, 0.12, 1.0), true)
+
+	var deck_cells: Array[Vector2i] = boarding_deck_cells
+	if deck_cells.is_empty():
+		for y in range(grid.height):
+			for x in range(grid.width):
+				deck_cells.append(Vector2i(x, y))
+
+	for cell in deck_cells:
+		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
+		draw_rect(cell_rect, Color(0.2, 0.16, 0.1), true)
+
+	for cell in boarding_chokepoint_cells:
+		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
+		draw_rect(cell_rect, Color(0.4, 0.28, 0.16, 0.5), true)
+
+	for cell in boarding_gangplank_cells:
+		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
+		draw_rect(cell_rect, Color(0.62, 0.47, 0.28, 0.75), true)
+
+	var objective_rect := Rect2(grid.position + Vector2(boarding_objective_cell) * tile, Vector2.ONE * tile)
+	draw_rect(objective_rect, Color(0.95, 0.8, 0.35, 0.8), true)
+
+	for cell in boarding_obstacle_cells:
+		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
+		draw_rect(cell_rect, Color(0.2, 0.17, 0.12, 0.95), true)
+
+	for cell in reachable_cells:
+		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
+		draw_rect(cell_rect, Color(0.3, 0.65, 1.0, 0.25), true)
+
+	if grid.is_in_bounds(grid.hovered_cell) and grid.is_cell_on_deck(grid.hovered_cell):
+		var hover_rect := Rect2(grid.position + Vector2(grid.hovered_cell) * tile, Vector2.ONE * tile)
+		draw_rect(hover_rect, Color(1.0, 1.0, 1.0, 0.15), true)
+
+	for cell in deck_cells:
+		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
+		draw_rect(cell_rect, Color(0.28, 0.3, 0.36), false, 1.0)
+
+func _draw_boarding_units_overlay() -> void:
+	if grid == null:
+		return
+	var tile := float(grid.tile_size)
+	var actor: Unit = _current_boarding_actor()
+	for unit in units:
+		if unit == null or not is_instance_valid(unit):
+			continue
+		var center := grid.position + Vector2(unit.cell) * tile + Vector2.ONE * tile * 0.5
+		var radius := tile * 0.34
+		var base_color := Color(0.35, 0.65, 1.0) if unit.team == Unit.Team.PLAYER else Color(1.0, 0.4, 0.35)
+		draw_circle(center, radius, base_color)
+		draw_string(ThemeDB.fallback_font, center + Vector2(-6.0, 6.0), str(unit.hp), HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
+		if unit == selected_unit:
+			draw_arc(center, radius + 4.0, 0.0, TAU, 32, Color(1.0, 1.0, 0.5), 3.0)
+		if unit == actor:
+			draw_arc(center, radius + 8.0, 0.0, TAU, 40, Color(1.0, 0.92, 0.45, 0.95), 3.0)
+		if unit.has_acted:
+			draw_circle(center, radius, Color(0.0, 0.0, 0.0, 0.4))
 
 func _draw_ship_movement_preview(grid_rect: Rect2) -> void:
 	if game_flow.current_mode != GameFlow.Mode.SHIP_COMBAT:
@@ -1668,9 +1954,90 @@ func _setup_left_sidebar_ui() -> void:
 
 	var title := Label.new()
 	title.text = "Menu"
-	title.position = Vector2(24, 16)
+	title.position = Vector2(18, 16)
 	title.add_theme_font_size_override("font_size", 18)
 	left_sidebar_panel.add_child(title)
+
+	left_sidebar_menu_box = VBoxContainer.new()
+	left_sidebar_menu_box.position = Vector2(12.0, 52.0)
+	left_sidebar_menu_box.size = Vector2(maxf(80.0, sidebar_width - 24.0), maxf(80.0, map_height - 64.0))
+	left_sidebar_menu_box.add_theme_constant_override("separation", 7)
+	left_sidebar_panel.add_child(left_sidebar_menu_box)
+	left_sidebar_menu_box.add_child(_make_sidebar_button("Save", _on_map_save_pressed))
+	left_sidebar_menu_box.add_child(_make_sidebar_button("Load", _on_map_load_pressed))
+	left_sidebar_menu_box.add_child(_make_sidebar_button("Player / Captain", _on_map_captain_pressed))
+	left_sidebar_menu_box.add_child(_make_sidebar_button("Crew Management", _on_map_crew_pressed))
+	left_sidebar_menu_box.add_child(_make_sidebar_button("Captain's Log", _on_map_captains_log_pressed))
+	left_sidebar_menu_box.add_child(_make_sidebar_button("Port Information", _on_map_port_info_pressed))
+	left_sidebar_menu_box.add_child(_make_sidebar_button("Retire", _on_map_retire_pressed))
+
+func _make_sidebar_button(text: String, action: Callable) -> Button:
+	var button := Button.new()
+	button.text = text
+	button.custom_minimum_size = Vector2(150.0, 34.0)
+	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	button.pressed.connect(action)
+	return button
+
+func _setup_main_map_info_ui() -> void:
+	main_map_info_layer = CanvasLayer.new()
+	main_map_info_layer.layer = 92
+	main_map_info_layer.visible = false
+	add_child(main_map_info_layer)
+
+	main_map_info_overlay = ColorRect.new()
+	main_map_info_overlay.color = Color(0.0, 0.0, 0.0, 0.56)
+	main_map_info_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	main_map_info_layer.add_child(main_map_info_overlay)
+
+	main_map_info_panel = PanelContainer.new()
+	main_map_info_layer.add_child(main_map_info_panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 10)
+	main_map_info_panel.add_child(box)
+
+	main_map_info_title_label = Label.new()
+	main_map_info_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	main_map_info_title_label.add_theme_font_size_override("font_size", 24)
+	box.add_child(main_map_info_title_label)
+
+	main_map_info_text_label = Label.new()
+	main_map_info_text_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	main_map_info_text_label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	main_map_info_text_label.custom_minimum_size = Vector2(620.0, 360.0)
+	box.add_child(main_map_info_text_label)
+
+	main_map_info_close_button = Button.new()
+	main_map_info_close_button.text = "Close"
+	main_map_info_close_button.custom_minimum_size = Vector2(180.0, 36.0)
+	main_map_info_close_button.pressed.connect(_close_main_map_info)
+	box.add_child(main_map_info_close_button)
+
+	main_map_info_x_button = Button.new()
+	main_map_info_x_button.text = "X"
+	main_map_info_x_button.custom_minimum_size = Vector2(30.0, 30.0)
+	main_map_info_x_button.pressed.connect(_close_main_map_info)
+	main_map_info_panel.add_child(main_map_info_x_button)
+
+func _open_main_map_info(title: String, body: String, close_label: String = "Close", return_to_main_menu_on_close: bool = false) -> void:
+	if main_map_info_layer == null:
+		return
+	retirement_pending_return_to_menu = return_to_main_menu_on_close
+	main_map_info_title_label.text = title
+	main_map_info_text_label.text = body
+	if main_map_info_close_button != null:
+		main_map_info_close_button.text = close_label
+	main_map_info_layer.visible = game_flow.current_mode == GameFlow.Mode.WORLD_MAP
+	_layout_worldmap_ui()
+
+func _close_main_map_info() -> void:
+	var should_return_to_menu := retirement_pending_return_to_menu
+	retirement_pending_return_to_menu = false
+	if main_map_info_layer != null:
+		main_map_info_layer.visible = false
+	if should_return_to_menu:
+		_on_escape_quit_to_menu_pressed()
 
 func _setup_time_controls_ui() -> void:
 	time_controls_layer = CanvasLayer.new()
@@ -1683,10 +2050,10 @@ func _setup_time_controls_ui() -> void:
 	time_controls_layer.add_child(time_controls_box)
 
 	var group := ButtonGroup.new()
-	for scale in [1.0, 2.0, 4.0]:
-		var selected_scale: float = scale
+	for time_scale in [1.0, 2.0, 4.0]:
+		var selected_scale: float = time_scale
 		var button := Button.new()
-		button.text = "%dx" % int(scale)
+		button.text = "%dx" % int(time_scale)
 		button.custom_minimum_size = Vector2(56, 34)
 		button.toggle_mode = true
 		button.button_group = group
@@ -1739,6 +2106,741 @@ func _setup_encounter_ui() -> void:
 	encounter_engage_button.custom_minimum_size = Vector2(320.0, 34.0)
 	encounter_engage_button.pressed.connect(_on_encounter_engage_pressed)
 	box.add_child(encounter_engage_button)
+
+func _setup_port_menu_ui() -> void:
+	port_menu_layer = CanvasLayer.new()
+	port_menu_layer.layer = 95
+	port_menu_layer.visible = false
+	add_child(port_menu_layer)
+
+	var overlay := ColorRect.new()
+	overlay.color = Color(0.0, 0.0, 0.0, 0.62)
+	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	port_menu_layer.add_child(overlay)
+
+	port_menu_panel = PanelContainer.new()
+	port_menu_panel.focus_mode = Control.FOCUS_NONE
+	var panel_bg := StyleBoxFlat.new()
+	panel_bg.bg_color = Color(0.07, 0.09, 0.12, 0.98)
+	panel_bg.set_corner_radius_all(6)
+	panel_bg.content_margin_left = 0
+	panel_bg.content_margin_top = 0
+	panel_bg.content_margin_right = 0
+	panel_bg.content_margin_bottom = 0
+	port_menu_panel.add_theme_stylebox_override("panel", panel_bg)
+
+	port_menu_layer.add_child(port_menu_panel)
+
+	var outer_margin := MarginContainer.new()
+	outer_margin.add_theme_constant_override("margin_left", 12)
+	outer_margin.add_theme_constant_override("margin_top", 10)
+	outer_margin.add_theme_constant_override("margin_right", 12)
+	outer_margin.add_theme_constant_override("margin_bottom", 12)
+	port_menu_panel.add_child(outer_margin)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 8)
+	outer_margin.add_child(box)
+
+	var header_row := HBoxContainer.new()
+	header_row.add_theme_constant_override("separation", 8)
+	box.add_child(header_row)
+
+	var title_left_pad := Control.new()
+	title_left_pad.custom_minimum_size = Vector2(36.0, 1.0)
+	title_left_pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	header_row.add_child(title_left_pad)
+
+	port_menu_title_label = Label.new()
+	port_menu_title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	port_menu_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	port_menu_title_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	port_menu_title_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	port_menu_title_label.add_theme_font_size_override("font_size", 24)
+	header_row.add_child(port_menu_title_label)
+
+	port_menu_close_button = Button.new()
+	port_menu_close_button.text = "X"
+	port_menu_close_button.custom_minimum_size = Vector2(36.0, 32.0)
+	port_menu_close_button.focus_mode = Control.FOCUS_CLICK
+	port_menu_close_button.flat = true
+	port_menu_close_button.pressed.connect(_on_port_menu_close_pressed)
+	header_row.add_child(port_menu_close_button)
+
+	port_menu_image_rect = ColorRect.new()
+	port_menu_image_rect.color = Color(0.16, 0.23, 0.33, 0.95)
+	port_menu_image_rect.custom_minimum_size = Vector2(520.0, 170.0)
+	port_menu_image_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(port_menu_image_rect)
+
+	port_menu_image_label = Label.new()
+	port_menu_image_label.text = "Port image placeholder"
+	port_menu_image_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	port_menu_image_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	port_menu_image_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	port_menu_image_label.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	port_menu_image_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	port_menu_image_rect.add_child(port_menu_image_label)
+
+	port_menu_info_label = Label.new()
+	port_menu_info_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	port_menu_info_label.custom_minimum_size = Vector2(520.0, 92.0)
+	port_menu_info_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(port_menu_info_label)
+
+	port_menu_status_label = Label.new()
+	port_menu_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	port_menu_status_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(port_menu_status_label)
+
+	port_menu_primary_button = Button.new()
+	port_menu_primary_button.custom_minimum_size = Vector2(360.0, 36.0)
+	port_menu_primary_button.focus_mode = Control.FOCUS_CLICK
+	port_menu_primary_button.pressed.connect(_on_port_menu_primary_pressed)
+	box.add_child(port_menu_primary_button)
+
+	port_menu_secondary_button = Button.new()
+	port_menu_secondary_button.custom_minimum_size = Vector2(360.0, 36.0)
+	port_menu_secondary_button.focus_mode = Control.FOCUS_CLICK
+	port_menu_secondary_button.pressed.connect(_on_port_menu_secondary_pressed)
+	box.add_child(port_menu_secondary_button)
+
+	port_menu_tertiary_button = Button.new()
+	port_menu_tertiary_button.custom_minimum_size = Vector2(360.0, 34.0)
+	port_menu_tertiary_button.focus_mode = Control.FOCUS_CLICK
+	port_menu_tertiary_button.pressed.connect(_on_port_menu_tertiary_pressed)
+	box.add_child(port_menu_tertiary_button)
+
+	port_menu_quaternary_button = Button.new()
+	port_menu_quaternary_button.custom_minimum_size = Vector2(360.0, 34.0)
+	port_menu_quaternary_button.focus_mode = Control.FOCUS_CLICK
+	port_menu_quaternary_button.pressed.connect(_on_port_menu_quaternary_pressed)
+	box.add_child(port_menu_quaternary_button)
+
+	port_menu_quinary_button = Button.new()
+	port_menu_quinary_button.custom_minimum_size = Vector2(360.0, 34.0)
+	port_menu_quinary_button.focus_mode = Control.FOCUS_CLICK
+	port_menu_quinary_button.pressed.connect(_on_port_menu_quinary_pressed)
+	box.add_child(port_menu_quinary_button)
+
+	port_trade_panel = VBoxContainer.new()
+	port_trade_panel.visible = false
+	port_trade_panel.add_theme_constant_override("separation", 6)
+	box.add_child(port_trade_panel)
+
+	var trade_title := Label.new()
+	trade_title.text = "Trade Ledger"
+	trade_title.add_theme_font_size_override("font_size", 18)
+	port_trade_panel.add_child(trade_title)
+
+	var supply_row := HBoxContainer.new()
+	supply_row.add_theme_constant_override("separation", 8)
+	port_trade_panel.add_child(supply_row)
+	var supply_name := Label.new()
+	supply_name.text = "Food Supplies"
+	supply_name.custom_minimum_size = Vector2(180.0, 24.0)
+	supply_row.add_child(supply_name)
+	port_trade_supply_slider = HSlider.new()
+	port_trade_supply_slider.min_value = 0
+	port_trade_supply_slider.max_value = 40
+	port_trade_supply_slider.step = 1
+	port_trade_supply_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	port_trade_supply_slider.value_changed.connect(_on_port_trade_slider_changed)
+	supply_row.add_child(port_trade_supply_slider)
+	port_trade_supply_value_label = Label.new()
+	port_trade_supply_value_label.custom_minimum_size = Vector2(130.0, 24.0)
+	supply_row.add_child(port_trade_supply_value_label)
+
+	port_trade_total_label = Label.new()
+	port_trade_total_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	port_trade_panel.add_child(port_trade_total_label)
+
+	var trade_btn_row := HBoxContainer.new()
+	trade_btn_row.add_theme_constant_override("separation", 8)
+	port_trade_panel.add_child(trade_btn_row)
+	port_trade_buy_button = Button.new()
+	port_trade_buy_button.text = "Confirm Purchase"
+	port_trade_buy_button.custom_minimum_size = Vector2(180.0, 34.0)
+	port_trade_buy_button.focus_mode = Control.FOCUS_CLICK
+	port_trade_buy_button.pressed.connect(_on_port_trade_buy_pressed)
+	trade_btn_row.add_child(port_trade_buy_button)
+	port_trade_cancel_button = Button.new()
+	port_trade_cancel_button.text = "Back"
+	port_trade_cancel_button.custom_minimum_size = Vector2(120.0, 34.0)
+	port_trade_cancel_button.focus_mode = Control.FOCUS_CLICK
+	port_trade_cancel_button.pressed.connect(_on_port_trade_cancel_pressed)
+	trade_btn_row.add_child(port_trade_cancel_button)
+
+	port_hire_panel = VBoxContainer.new()
+	port_hire_panel.visible = false
+	port_hire_panel.add_theme_constant_override("separation", 8)
+	box.add_child(port_hire_panel)
+	var hire_title := Label.new()
+	hire_title.text = "Tavern Hiring Board"
+	hire_title.add_theme_font_size_override("font_size", 18)
+	port_hire_panel.add_child(hire_title)
+	var hire_row := HBoxContainer.new()
+	hire_row.add_theme_constant_override("separation", 8)
+	port_hire_panel.add_child(hire_row)
+	var hire_label := Label.new()
+	hire_label.text = "New Pirates"
+	hire_label.custom_minimum_size = Vector2(180.0, 24.0)
+	hire_row.add_child(hire_label)
+	port_hire_slider = HSlider.new()
+	port_hire_slider.min_value = 0
+	port_hire_slider.max_value = 8
+	port_hire_slider.step = 1
+	port_hire_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	port_hire_slider.value_changed.connect(_on_port_hire_slider_changed)
+	hire_row.add_child(port_hire_slider)
+	port_hire_value_label = Label.new()
+	port_hire_value_label.custom_minimum_size = Vector2(130.0, 24.0)
+	hire_row.add_child(port_hire_value_label)
+	port_hire_cost_label = Label.new()
+	port_hire_panel.add_child(port_hire_cost_label)
+	var hire_btn_row := HBoxContainer.new()
+	hire_btn_row.add_theme_constant_override("separation", 8)
+	port_hire_panel.add_child(hire_btn_row)
+	port_hire_confirm_button = Button.new()
+	port_hire_confirm_button.text = "Hire Crew"
+	port_hire_confirm_button.custom_minimum_size = Vector2(180.0, 34.0)
+	port_hire_confirm_button.focus_mode = Control.FOCUS_CLICK
+	port_hire_confirm_button.pressed.connect(_on_port_hire_confirm_pressed)
+	hire_btn_row.add_child(port_hire_confirm_button)
+	port_hire_cancel_button = Button.new()
+	port_hire_cancel_button.text = "Back"
+	port_hire_cancel_button.custom_minimum_size = Vector2(120.0, 34.0)
+	port_hire_cancel_button.focus_mode = Control.FOCUS_CLICK
+	port_hire_cancel_button.pressed.connect(_on_port_hire_cancel_pressed)
+	hire_btn_row.add_child(port_hire_cancel_button)
+
+func _open_port_arrival_menu(port_name: String) -> void:
+	current_port_menu_port = port_name
+	port_menu_active = true
+	port_menu_docked = false
+	port_menu_screen = "arrival"
+	can_start_town_assault = false
+
+	port_menu_title_label.text = "%s - Off the Coast" % port_name
+	port_menu_image_label.text = "Illustration: %s harbor approaches" % port_name
+	port_menu_info_label.text = "Your ship rides offshore. You can bombard and launch a landing party, or sail into the harbor to dock."
+	port_menu_status_label.text = "Choose your next move."
+	port_menu_primary_button.text = "Attack the Port (Land Combat)"
+	port_menu_secondary_button.text = "Sail Into Port"
+	port_menu_tertiary_button.text = "Leave Port"
+	port_menu_quaternary_button.text = "Launch Treasure Expedition"
+	port_menu_primary_button.visible = true
+	port_menu_secondary_button.visible = true
+	port_menu_tertiary_button.visible = true
+	port_menu_quaternary_button.visible = _can_launch_treasure_at_port(port_name)
+	port_menu_quinary_button.visible = false
+	port_trade_panel.visible = false
+	port_hire_panel.visible = false
+
+	port_menu_layer.visible = game_flow.current_mode == GameFlow.Mode.WORLD_MAP
+	_layout_worldmap_ui()
+
+func _open_port_docked_menu(port_name: String) -> void:
+	current_port_menu_port = port_name
+	port_menu_active = true
+	port_menu_docked = true
+	port_menu_screen = "docked"
+	can_start_town_assault = false
+
+	port_menu_title_label.text = "%s - Docked" % port_name
+	port_menu_image_label.text = "Illustration: %s docks and quays" % port_name
+	port_menu_info_label.text = "Your ship is secured at the quay. Provision, hire hands, or seek an audience with the governor."
+	port_menu_status_label.text = _port_docked_status_text("Harbor master awaits your orders.")
+	port_menu_primary_button.text = "Trade Supplies / Cargo"
+	port_menu_secondary_button.text = "Recruit New Pirates"
+	port_menu_tertiary_button.text = "Petition the Governor"
+	port_menu_quaternary_button.text = "Attack the Port (Land Combat)"
+	port_menu_quinary_button.text = "Leave Port (Return to Sea)"
+	port_menu_primary_button.visible = true
+	port_menu_secondary_button.visible = true
+	port_menu_tertiary_button.visible = true
+	port_menu_quaternary_button.visible = true
+	port_menu_quinary_button.visible = true
+	port_trade_panel.visible = false
+	port_hire_panel.visible = false
+
+	port_menu_layer.visible = game_flow.current_mode == GameFlow.Mode.WORLD_MAP
+	_layout_worldmap_ui()
+	_try_complete_governor_mission_on_docked(port_name)
+
+func _close_port_menu() -> void:
+	port_menu_active = false
+	port_menu_docked = false
+	port_menu_screen = "arrival"
+	current_port_menu_port = ""
+	if port_menu_layer != null:
+		port_menu_layer.visible = false
+
+func _on_port_menu_close_pressed() -> void:
+	if not port_menu_active:
+		return
+	var port_name := current_port_menu_port
+	_close_port_menu()
+	if port_name != "":
+		game_flow.post_message("Leaving %s port menu." % port_name)
+
+func _on_port_menu_primary_pressed() -> void:
+	if not port_menu_active:
+		return
+	if not port_menu_docked:
+		var target_port := current_port_menu_port
+		_close_port_menu()
+		last_arrived_port = target_port
+		can_start_town_assault = true
+		_start_town_assault_demo()
+		return
+	if port_menu_screen == "docked":
+		_open_port_trade_menu(current_port_menu_port)
+
+func _on_port_menu_secondary_pressed() -> void:
+	if not port_menu_active:
+		return
+	if not port_menu_docked:
+		var port_name := current_port_menu_port
+		_open_port_docked_menu(port_name)
+		game_flow.post_message("You sail into %s and dock safely." % port_name)
+		return
+	if port_menu_screen == "docked":
+		_open_port_hire_menu(current_port_menu_port)
+
+func _on_port_menu_tertiary_pressed() -> void:
+	if not port_menu_active:
+		return
+	if not port_menu_docked:
+		var departed_port := current_port_menu_port
+		_close_port_menu()
+		game_flow.post_message("You leave %s astern and remain at sea." % departed_port)
+		return
+	var docked_port := current_port_menu_port
+	var gift_cost := 120
+	if player_piasters >= gift_cost and randf() < 0.65:
+		player_piasters -= gift_cost
+		governor_favor += 1
+		if career_state.is_empty():
+			_reset_career_state()
+		if int(career_state.get("family_stage", 0)) < 3 and randf() < 0.5:
+			active_governor_task = "Family lead near %s" % docked_port
+			_advance_family_rescue_progress("Governor shared records tied to your missing family.")
+		else:
+			var sponsor_faction := _current_port_controller_faction(docked_port)
+			_offer_governor_contract(docked_port, sponsor_faction)
+			if not _governor_mission_is_active() and not active_governor_task.begins_with("Finish your"):
+				active_governor_task = "Escort a treasury sloop near %s" % docked_port
+		_award_career_fame(14, "Governor petition success")
+		var port_faction := _current_port_controller_faction(docked_port)
+		_apply_faction_reputation_delta(port_faction, 9, "successful governor mission")
+		game_flow.post_message("At %s: petition accepted. Governor favor increased." % docked_port)
+		port_menu_status_label.text = _port_docked_status_text("Governor grants a lead: %s." % active_governor_task)
+	else:
+		governor_favor = max(0, governor_favor - 1)
+		game_flow.post_message("At %s: governor refuses your petition this visit." % docked_port)
+		port_menu_status_label.text = _port_docked_status_text("Petition denied. Reputation with officials slips.")
+
+func _on_port_menu_quaternary_pressed() -> void:
+	if not port_menu_active:
+		return
+	if not port_menu_docked:
+		if _can_launch_treasure_at_port(current_port_menu_port):
+			_launch_treasure_expedition(current_port_menu_port)
+		return
+	var target_port := current_port_menu_port
+	_close_port_menu()
+	last_arrived_port = target_port
+	can_start_town_assault = true
+	_start_town_assault_demo()
+
+func _on_port_menu_quinary_pressed() -> void:
+	if not port_menu_active or not port_menu_docked:
+		return
+	var departed_port := current_port_menu_port
+	_close_port_menu()
+	game_flow.post_message("Casting off from %s. Back to open sea." % departed_port)
+
+func _open_port_trade_menu(port_name: String) -> void:
+	port_menu_screen = "trade"
+	port_menu_title_label.text = "%s - Trade Ledger" % port_name
+	port_menu_info_label.text = "Set food supplies and cargo quantities, then confirm one bulk purchase."
+	port_menu_primary_button.visible = false
+	port_menu_secondary_button.visible = false
+	port_menu_tertiary_button.visible = false
+	port_menu_quaternary_button.visible = false
+	port_menu_quinary_button.visible = false
+	port_trade_panel.visible = true
+	port_hire_panel.visible = false
+	_build_port_trade_rows(port_name)
+	_on_port_trade_slider_changed(0.0)
+
+func _open_port_hire_menu(port_name: String) -> void:
+	port_menu_screen = "hire"
+	port_menu_title_label.text = "%s - Hiring Board" % port_name
+	port_menu_info_label.text = "Set how many pirates you want to recruit from the taverns and dockside crews."
+	port_menu_primary_button.visible = false
+	port_menu_secondary_button.visible = false
+	port_menu_tertiary_button.visible = false
+	port_menu_quaternary_button.visible = false
+	port_menu_quinary_button.visible = false
+	port_trade_panel.visible = false
+	port_hire_panel.visible = true
+	port_hire_slider.value = 0
+	_on_port_hire_slider_changed(0.0)
+
+func _return_to_port_docked_actions() -> void:
+	_open_port_docked_menu(current_port_menu_port)
+
+func _seed_port_market_quotes_into_career() -> void:
+	var out: Dictionary = {}
+	for port_key in PORT_EXPORT_CARGO.keys():
+		var port_name: String = str(port_key)
+		var per: Dictionary = {}
+		var goods_variant: Variant = PORT_EXPORT_CARGO[port_key]
+		if goods_variant is Array:
+			for g in goods_variant as Array:
+				var gn: String = str(g)
+				per[gn] = lerpf(0.88, 1.2, randf())
+		out[port_name] = per
+	career_state["market_quotes"] = out
+
+func _ensure_market_quotes_defaults() -> void:
+	var mq_v: Variant = career_state.get("market_quotes", {})
+	if not mq_v is Dictionary or (mq_v as Dictionary).is_empty():
+		_seed_port_market_quotes_into_career()
+
+func _trade_unit_buy_price(port_name: String, cargo_name: String) -> int:
+	_ensure_career_state_defaults()
+	_ensure_market_quotes_defaults()
+	var base: int = int(CARGO_UNIT_COST.get(cargo_name, 18))
+	var mult: float = 1.0
+	var mq_v: Variant = career_state.get("market_quotes", {})
+	if mq_v is Dictionary:
+		var pm_v: Variant = (mq_v as Dictionary).get(port_name, {})
+		if pm_v is Dictionary:
+			mult = float((pm_v as Dictionary).get(cargo_name, 1.0))
+	return maxi(4, int(round(float(base) * mult)))
+
+func _tick_port_markets_for_month() -> void:
+	_ensure_career_state_defaults()
+	_ensure_market_quotes_defaults()
+	var mq_v: Variant = career_state.get("market_quotes", {})
+	if not mq_v is Dictionary:
+		return
+	var mq: Dictionary = mq_v as Dictionary
+	for port_key in mq.keys():
+		var pm_v: Variant = mq[port_key]
+		if not pm_v is Dictionary:
+			continue
+		var pm: Dictionary = pm_v as Dictionary
+		for cargo_key in pm.keys():
+			var w: float = float(pm[cargo_key])
+			w += randf_range(-0.045, 0.045)
+			pm[cargo_key] = clampf(w, 0.72, 1.45)
+	career_state["market_quotes"] = mq
+
+func _governor_mission_is_active() -> bool:
+	_ensure_career_state_defaults()
+	var m: Variant = career_state.get("active_mission", {})
+	if not m is Dictionary:
+		return false
+	var md: Dictionary = m as Dictionary
+	return md.has("kind") and str(md.get("kind", "")) != ""
+
+func _clear_active_governor_mission() -> void:
+	career_state.erase("active_mission")
+	active_governor_task = ""
+
+func _pay_and_clear_governor_mission(md: Dictionary) -> void:
+	var coin: int = int(md.get("reward_coin", 0))
+	var fame: int = int(md.get("reward_fame", 0))
+	var rf: String = str(md.get("rep_faction", ""))
+	var ra: int = int(md.get("rep_amount", 0))
+	player_piasters += coin
+	if fame > 0:
+		_award_career_fame(fame, "Governor commission")
+	if rf != "" and ra != 0:
+		_apply_faction_reputation_delta(rf, ra, "commission fulfilled")
+	game_flow.post_message("Commission paid: +%d pieces of eight to the crew chest." % coin)
+	_clear_active_governor_mission()
+
+func _offer_governor_contract(offer_port: String, sponsor_faction: String) -> void:
+	_ensure_career_state_defaults()
+	if _governor_mission_is_active():
+		active_governor_task = "Finish your current commission before taking a new one."
+		return
+	var names: Array[String] = world_map.get_port_names()
+	if names.size() < 2:
+		active_governor_task = "Escort a treasury sloop near %s" % offer_port
+		return
+	var other_ports: Array[String] = []
+	for p in names:
+		if p != offer_port:
+			other_ports.append(p)
+	other_ports.shuffle()
+	var dest_port: String = other_ports[0]
+	var roll := randi() % 3
+	if roll == 0:
+		career_state["active_mission"] = {
+			"kind": "deliver",
+			"destination": dest_port,
+			"reward_coin": 200 + randi_range(0, 140),
+			"reward_fame": 14,
+			"rep_faction": sponsor_faction,
+			"rep_amount": 7,
+			"title": "Carry sealed dispatches to %s" % dest_port
+		}
+	elif roll == 1:
+		var enemies: Array[String] = []
+		for f in FACTION_LIST:
+			if str(f) != sponsor_faction:
+				enemies.append(str(f))
+		enemies.shuffle()
+		var victim: String = enemies[0] if not enemies.is_empty() else "English"
+		career_state["active_mission"] = {
+			"kind": "patrol_win",
+			"victim_faction": victim,
+			"reward_coin": 280 + randi_range(0, 160),
+			"reward_fame": 24,
+			"rep_faction": sponsor_faction,
+			"rep_amount": 9,
+			"title": "Letter of marque: hunt %s merchantmen" % victim
+		}
+	else:
+		var exports_variant: Variant = PORT_EXPORT_CARGO.get(offer_port, ["Sugar", "Rum"])
+		var cargo_pick := "Sugar"
+		if exports_variant is Array and not (exports_variant as Array).is_empty():
+			var ea: Array = exports_variant as Array
+			cargo_pick = str(ea[randi() % ea.size()])
+		var amt: int = 6 + randi_range(0, 7)
+		var ship_dest: String = other_ports[0]
+		if ship_dest == offer_port and other_ports.size() > 1:
+			ship_dest = other_ports[1]
+		career_state["active_mission"] = {
+			"kind": "cargo_delivery",
+			"cargo": cargo_pick,
+			"amount": amt,
+			"destination": ship_dest,
+			"reward_coin": 180 + amt * 12,
+			"reward_fame": 18,
+			"rep_faction": sponsor_faction,
+			"rep_amount": 6,
+			"title": "Smuggle %d crates of %s into %s" % [amt, cargo_pick, ship_dest]
+		}
+	var md: Dictionary = career_state["active_mission"] as Dictionary
+	active_governor_task = str(md.get("title", ""))
+
+func _try_complete_governor_mission_on_docked(port_name: String) -> void:
+	if not port_menu_active or not port_menu_docked:
+		return
+	if not _governor_mission_is_active():
+		return
+	var m: Variant = career_state.get("active_mission", {})
+	if not m is Dictionary:
+		return
+	var md: Dictionary = m as Dictionary
+	var kind: String = str(md.get("kind", ""))
+	if kind == "deliver":
+		if port_name == str(md.get("destination", "")):
+			_pay_and_clear_governor_mission(md)
+			port_menu_status_label.text = _port_docked_status_text("Dispatches delivered. Paymaster settles your share.")
+	elif kind == "cargo_delivery":
+		if port_name != str(md.get("destination", "")):
+			return
+		var cargo: String = str(md.get("cargo", ""))
+		var need: int = int(md.get("amount", 0))
+		var have: int = int(cargo_manifest.get(cargo, 0))
+		if have < need:
+			port_menu_status_label.text = _port_docked_status_text(
+				"Contract open: land %d %s here (holding %d)." % [need, cargo, have]
+			)
+			return
+		cargo_manifest[cargo] = have - need
+		if int(cargo_manifest.get(cargo, 0)) <= 0:
+			cargo_manifest.erase(cargo)
+		ship_cargo = maxi(0, ship_cargo - need)
+		_pay_and_clear_governor_mission(md)
+		port_menu_status_label.text = _port_docked_status_text("Consignment landed. Bribes squared with the wharf.")
+
+func _try_progress_governor_mission_naval_win(player_won: bool, enemy_faction: String, was_aggressor: bool) -> void:
+	if not player_won or enemy_faction == "" or enemy_faction == "Unknown":
+		return
+	if not _governor_mission_is_active():
+		return
+	var m: Variant = career_state.get("active_mission", {})
+	if not m is Dictionary:
+		return
+	var md: Dictionary = m as Dictionary
+	if str(md.get("kind", "")) != "patrol_win":
+		return
+	if enemy_faction != str(md.get("victim_faction", "")):
+		return
+	if not was_aggressor:
+		game_flow.post_message("Governor wanted an aggressive sweep against %s shipping, not a chance meeting." % enemy_faction)
+		return
+	_pay_and_clear_governor_mission(md)
+	game_flow.post_message("Letter of marque satisfied: agents record your action against %s." % enemy_faction)
+
+func _build_port_trade_rows(port_name: String) -> void:
+	for row_data in port_trade_cargo_rows:
+		if row_data is Dictionary:
+			var row_node: HBoxContainer = row_data.get("row")
+			if row_node != null and is_instance_valid(row_node):
+				row_node.queue_free()
+	port_trade_cargo_rows.clear()
+	var cargo_list: Array = PORT_EXPORT_CARGO.get(port_name, ["Sugar", "Rum", "Tobacco"])
+	for cargo_name_variant in cargo_list:
+		var cargo_name := str(cargo_name_variant)
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		port_trade_panel.add_child(row)
+		port_trade_panel.move_child(row, 2 + port_trade_cargo_rows.size())
+		var name_label := Label.new()
+		var unit_px: int = _trade_unit_buy_price(port_name, cargo_name)
+		name_label.text = "%s (%d ea.)" % [cargo_name, unit_px]
+		name_label.custom_minimum_size = Vector2(200.0, 24.0)
+		row.add_child(name_label)
+		var slider := HSlider.new()
+		slider.min_value = 0
+		slider.max_value = 20
+		slider.step = 1
+		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		slider.value_changed.connect(_on_port_trade_slider_changed)
+		row.add_child(slider)
+		var value_label := Label.new()
+		value_label.custom_minimum_size = Vector2(130.0, 24.0)
+		row.add_child(value_label)
+		port_trade_cargo_rows.append({
+			"row": row,
+			"name": cargo_name,
+			"name_label": name_label,
+			"slider": slider,
+			"value_label": value_label
+		})
+
+func _on_port_trade_slider_changed(_value: float) -> void:
+	if port_trade_panel == null or not port_trade_panel.visible:
+		return
+	var supplies_units := int(round(port_trade_supply_slider.value))
+	port_trade_supply_value_label.text = "%d units (%d pieces of eight)" % [supplies_units, supplies_units * SUPPLY_UNIT_COST]
+	var cargo_units := 0
+	var cargo_cost := 0
+	for row_data in port_trade_cargo_rows:
+		var cargo_name: String = row_data["name"]
+		var slider: HSlider = row_data["slider"]
+		var value_label: Label = row_data["value_label"]
+		var selected_units := int(round(slider.value))
+		var unit_cost: int = _trade_unit_buy_price(current_port_menu_port, cargo_name)
+		value_label.text = "%d crates (%d pieces of eight)" % [selected_units, selected_units * unit_cost]
+		if row_data.has("name_label"):
+			var nl: Label = row_data["name_label"]
+			nl.text = "%s (%d ea.)" % [cargo_name, unit_cost]
+		cargo_units += selected_units
+		cargo_cost += selected_units * unit_cost
+	var total_cost := supplies_units * SUPPLY_UNIT_COST + cargo_cost
+	port_trade_total_label.text = "Purchase: %d supply units, %d cargo crates | Total Cost: %d pieces of eight | Coin: %d pieces of eight" % [
+		supplies_units,
+		cargo_units,
+		total_cost,
+		player_piasters
+	]
+	port_trade_buy_button.disabled = total_cost <= 0 or total_cost > player_piasters
+
+func _on_port_trade_buy_pressed() -> void:
+	if not port_menu_active or port_menu_screen != "trade":
+		return
+	var supplies_units := int(round(port_trade_supply_slider.value))
+	var cargo_total_units := 0
+	var cargo_cost := 0
+	var bought_details: Array[String] = []
+	for row_data in port_trade_cargo_rows:
+		var cargo_name: String = row_data["name"]
+		var slider: HSlider = row_data["slider"]
+		var selected_units := int(round(slider.value))
+		if selected_units <= 0:
+			continue
+		var unit_cost: int = _trade_unit_buy_price(current_port_menu_port, cargo_name)
+		cargo_cost += selected_units * unit_cost
+		cargo_total_units += selected_units
+		cargo_manifest[cargo_name] = int(cargo_manifest.get(cargo_name, 0)) + selected_units
+		bought_details.append("%s x%d" % [cargo_name, selected_units])
+	var total_cost := supplies_units * SUPPLY_UNIT_COST + cargo_cost
+	if total_cost <= 0:
+		port_menu_status_label.text = _port_docked_status_text("Select quantities before purchasing.")
+		return
+	if total_cost > player_piasters:
+		port_menu_status_label.text = _port_docked_status_text("Insufficient coin for this manifest (%d pieces of eight needed)." % total_cost)
+		return
+	player_piasters -= total_cost
+	ship_supplies += supplies_units
+	ship_cargo += cargo_total_units
+	_award_career_fame(10 + int(cargo_total_units * 0.5), "Port trade success")
+	var details := ", ".join(bought_details) if not bought_details.is_empty() else "No cargo"
+	game_flow.post_message("At %s: purchased %d supplies and cargo [%s] for %d pieces of eight." % [current_port_menu_port, supplies_units, details, total_cost])
+	_return_to_port_docked_actions()
+	port_menu_status_label.text = _port_docked_status_text("Trade complete.")
+
+func _on_port_trade_cancel_pressed() -> void:
+	if not port_menu_active or port_menu_screen != "trade":
+		return
+	_return_to_port_docked_actions()
+
+func _on_port_hire_slider_changed(_value: float) -> void:
+	if port_hire_panel == null or not port_hire_panel.visible:
+		return
+	var recruits := int(round(port_hire_slider.value))
+	var total_cost := recruits * RECRUIT_COST
+	port_hire_value_label.text = "%d hires" % recruits
+	port_hire_cost_label.text = "Cost: %d pieces of eight | Coin: %d pieces of eight" % [total_cost, player_piasters]
+	port_hire_confirm_button.disabled = recruits <= 0 or total_cost > player_piasters
+
+func _on_port_hire_confirm_pressed() -> void:
+	if not port_menu_active or port_menu_screen != "hire":
+		return
+	var recruits := int(round(port_hire_slider.value))
+	var total_cost := recruits * RECRUIT_COST
+	if recruits <= 0:
+		port_menu_status_label.text = _port_docked_status_text("Set recruit count before hiring.")
+		return
+	if total_cost > player_piasters:
+		port_menu_status_label.text = _port_docked_status_text("Not enough pieces of eight to hire %d recruits." % recruits)
+		return
+	player_piasters -= total_cost
+	crew_roster_size += recruits
+	_award_career_fame(8 + recruits * 2, "Expanded crew roster")
+	game_flow.post_message("At %s: hired %d new pirates for %d pieces of eight." % [current_port_menu_port, recruits, total_cost])
+	_return_to_port_docked_actions()
+	port_menu_status_label.text = _port_docked_status_text("Recruitment complete.")
+
+func _on_port_hire_cancel_pressed() -> void:
+	if not port_menu_active or port_menu_screen != "hire":
+		return
+	_return_to_port_docked_actions()
+
+func _port_docked_status_text(lead: String) -> String:
+	if career_state.is_empty():
+		_reset_career_state()
+	var task_text := active_governor_task if active_governor_task != "" else "None"
+	var cargo_lines: Array[String] = []
+	for key in cargo_manifest.keys():
+		var qty := int(cargo_manifest[key])
+		if qty > 0:
+			cargo_lines.append("%s:%d" % [str(key), qty])
+	cargo_lines.sort()
+	var cargo_text := ", ".join(cargo_lines) if not cargo_lines.is_empty() else "None"
+	return "%s\nRank: %s | Fame: %d\nCoin: %d | Supplies: %d | Cargo: %d | Crew: %d | Governor Favor: %d | Task: %s\nManifest: %s" % [
+		lead,
+		str(career_state.get("rank_title", "Deckhand")),
+		int(career_state.get("fame", 0)),
+		player_piasters,
+		ship_supplies,
+		ship_cargo,
+		crew_roster_size,
+		governor_favor,
+		task_text,
+		cargo_text
+	]
 
 func _setup_main_menu_ui() -> void:
 	main_menu_layer = CanvasLayer.new()
@@ -1838,6 +2940,8 @@ func _start_spotting_encounter() -> void:
 	pending_encounter = {
 		"player_ship_class": player_class,
 		"enemy_ship_class": enemy_class,
+		"enemy_faction": _random_enemy_faction(),
+		"player_is_aggressor": false,
 		"player_heading": player_heading,
 		"enemy_heading": enemy_heading,
 		"player_speed_knots": player_speed,
@@ -1853,6 +2957,7 @@ func _start_spotting_encounter() -> void:
 
 	if not player_spots_first:
 		game_flow.post_message("You failed to spot the contact before they closed. Enemy ship engages!")
+		pending_encounter["player_is_aggressor"] = false
 		_begin_ship_battle_from_encounter("Enemy gains initiative.")
 		return
 
@@ -1888,6 +2993,7 @@ func _on_encounter_avoid_pressed() -> void:
 func _on_encounter_pursue_pressed() -> void:
 	if pending_encounter.is_empty():
 		return
+	pending_encounter["player_is_aggressor"] = true
 	var chance: float = _encounter_pursuit_chance(pending_encounter)
 	if randf() <= chance:
 		_begin_ship_battle_from_encounter("You close the distance and force battle.")
@@ -1897,10 +3003,12 @@ func _on_encounter_pursue_pressed() -> void:
 func _on_encounter_engage_pressed() -> void:
 	if pending_encounter.is_empty():
 		return
+	pending_encounter["player_is_aggressor"] = true
 	_begin_ship_battle_from_encounter("You hoist battle colors and engage.")
 
 func _on_main_menu_start_pressed() -> void:
 	_begin_gameplay_from_main_menu()
+	_reset_port_economy_state()
 	_set_mode(GameFlow.Mode.WORLD_MAP)
 	_on_mode_changed(game_flow.current_mode)
 	_layout_worldmap_ui()
@@ -1939,7 +3047,198 @@ func _on_main_menu_dev_town_combat_pressed() -> void:
 	game_flow.post_message("Dev test: town combat launched.")
 
 func _on_main_menu_load_pressed() -> void:
-	main_menu_status_label.text = "Load Existing Game is not implemented yet."
+	_begin_gameplay_from_main_menu()
+	if _load_game():
+		main_menu_status_label.text = ""
+		game_flow.post_message("Loaded saved game.")
+	else:
+		in_main_menu = true
+		main_menu_layer.visible = true
+		main_menu_status_label.text = "No save file found."
+
+func _on_map_save_pressed() -> void:
+	if game_flow.current_mode != GameFlow.Mode.WORLD_MAP:
+		return
+	if _save_game():
+		game_flow.post_message("Game saved from the map menu.")
+		_open_main_map_info("Save Game", "Game saved successfully.")
+	else:
+		_open_main_map_info("Save Game", "Save failed.")
+
+func _on_map_load_pressed() -> void:
+	if game_flow.current_mode != GameFlow.Mode.WORLD_MAP:
+		return
+	if _load_game():
+		in_main_menu = false
+		if main_menu_layer != null:
+			main_menu_layer.visible = false
+		game_flow.post_message("Game loaded from the map menu.")
+		_open_main_map_info("Load Game", "Game loaded successfully.")
+	else:
+		_open_main_map_info("Load Game", "No save file found.")
+
+func _on_map_captain_pressed() -> void:
+	_open_main_map_info("Player / Captain", _captain_page_text())
+
+func _on_map_crew_pressed() -> void:
+	_open_main_map_info("Crew Management", _crew_management_text())
+
+func _on_map_captains_log_pressed() -> void:
+	var log_text := "\n".join(captain_log_lines)
+	if log_text == "":
+		log_text = "No entries yet."
+	_open_main_map_info("Captain's Log", log_text)
+
+func _on_map_port_info_pressed() -> void:
+	_open_main_map_info("Port Information", _port_information_text())
+
+func _on_map_retire_pressed() -> void:
+	if game_flow.current_mode != GameFlow.Mode.WORLD_MAP:
+		return
+	if career_state.is_empty():
+		_reset_career_state()
+	var fame := int(career_state.get("fame", 0))
+	var rank_title := str(career_state.get("rank_title", "Deckhand"))
+	var wealth_score := int(round(float(player_piasters) * 0.25))
+	var treasure_bonus := 450 if bool(career_state.get("treasure_completed", false)) else 0
+	var favor_bonus := governor_favor * 18
+	var total := int(CareerSystemScript.retirement_score(career_state, player_piasters)) + treasure_bonus + favor_bonus
+	var legacy := "Legendary" if total >= 1600 else ("Distinguished" if total >= 1050 else ("Noted" if total >= 650 else "Obscure"))
+	career_state["retired"] = true
+	career_state["retirement_score"] = total
+	var report := "Retirement Ledger\n\nFinal Rank: %s\nFame Score: %d\nWealth Score: %d\nTreasure Bonus: %d\nGovernor Favor Bonus: %d\nTotal Score: %d\nLegacy: %s\n\nClose this report to return to the main menu." % [
+		rank_title,
+		fame,
+		wealth_score,
+		treasure_bonus,
+		favor_bonus,
+		total,
+		legacy
+	]
+	game_flow.post_message("Captain retired with a %s legacy (%d score)." % [legacy, total])
+	_open_main_map_info("Retirement Complete", report, "Return to Main Menu", true)
+
+func _captain_page_text() -> String:
+	_ensure_career_state_defaults()
+	var task_text := active_governor_task if active_governor_task != "" else "None"
+	var rep_dict: Dictionary = _get_faction_reputation_dict_from_career()
+	var rep_lines: Array[String] = []
+	for faction_name in FACTION_LIST:
+		rep_lines.append("%s %d" % [faction_name, int(rep_dict.get(faction_name, 0))])
+	var rep_text := ", ".join(rep_lines)
+	var map_name := str(career_state.get("treasure_map_name", "None"))
+	var treasure_port := str(career_state.get("treasure_target_port", ""))
+	var treasure_text := "Recovered" if bool(career_state.get("treasure_completed", false)) else (
+		("Ready near %s" % treasure_port) if bool(career_state.get("treasure_ready", false)) and treasure_port != "" else "Not ready"
+	)
+	var family_stage := int(career_state.get("family_stage", 0))
+	var family_rescued := bool(career_state.get("family_rescued", false))
+	var family_text := "Rescued" if family_rescued else "Leads %d/4" % family_stage
+	var captain_age := float(career_state.get("captain_age", 22.0))
+	var aging_penalty_pct := int(round(float(career_state.get("aging_penalty", 0.0)) * 100.0))
+	var morale := int(career_state.get("crew_morale", 70))
+	var retirement := int(CareerSystemScript.retirement_score(career_state, player_piasters))
+	return "Captain: Player Captain\nShip: %s\nCareer Rank: %s\nFame: %d\nAge: %.1f (Aging pressure: %d%%)\nCrew Morale: %d\nCoin: %d pieces of eight\nSupplies: %d\nCargo: %d crates\nCrew: %d\nGovernor Favor: %d\nFaction Reputation: %s\nCurrent Task: %s\nTreasure Map: %s\nTreasure Hunt: %s\nFamily Rescue: %s\nProjected Retirement Score: %d" % [
+		world_map.ship_class,
+		str(career_state.get("rank_title", "Deckhand")),
+		int(career_state.get("fame", 0)),
+		captain_age,
+		aging_penalty_pct,
+		morale,
+		player_piasters,
+		ship_supplies,
+		ship_cargo,
+		crew_roster_size,
+		governor_favor,
+		rep_text,
+		task_text,
+		map_name,
+		treasure_text,
+		family_text,
+		retirement
+	]
+
+func _crew_management_text() -> String:
+	_ensure_crew_roster()
+	var lines: Array[String] = []
+	lines.append("Crew Overview")
+	lines.append("Total roster: %d pirates. Ship-duty specialists improve when their duty succeeds during travel, spotting, repairs, trade, or combat." % crew_roster_size)
+	lines.append("")
+	lines.append("Ship Duties")
+	for officer in crew_officers:
+		lines.append("%s - %s" % [str(officer.get("role", "Officer")), str(officer.get("name", "Unnamed"))])
+		lines.append("  Stats: %s" % _stats_text(officer.get("stats", {})))
+		lines.append("  Growth: %s" % str(officer.get("duty", "")))
+	lines.append("")
+	lines.append("Boarding Party")
+	lines.append("These crew use combat stats during deck fights and can later equip improved swords, guns, and armor.")
+	for crew in boarding_party_roster:
+		lines.append("%s - %s" % [str(crew.get("name", "Unnamed")), str(crew.get("role", "Boarder"))])
+		lines.append("  Combat: %s" % _stats_text(crew.get("stats", {})))
+		lines.append("  Gear: %s" % _gear_text(crew.get("gear", {})))
+	return "\n".join(lines)
+
+func _port_information_text() -> String:
+	var port_name := current_port_menu_port
+	if port_name == "":
+		port_name = last_arrived_port
+	if port_name == "":
+		port_name = world_map.target_port_name
+	if port_name == "":
+		return "No port selected. Click a port on the map or dock at one to review local information."
+	if not world_map.ports.has(port_name):
+		return "No port information available."
+	var faction := _current_port_controller_faction(port_name)
+	var rep_dict: Dictionary = _get_faction_reputation_dict_from_career()
+	var rep_value := int(rep_dict.get(faction, 0))
+	var wars_text := "None active"
+	var war_src: Variant = career_state.get("active_wars", [])
+	if war_src is Array and not (war_src as Array).is_empty():
+		var war_parts: Array[String] = []
+		for item in war_src as Array:
+			if item is Dictionary:
+				var wd: Dictionary = item
+				war_parts.append("%s vs %s" % [str(wd.get("a", "?")), str(wd.get("b", "?"))])
+		if not war_parts.is_empty():
+			wars_text = ", ".join(war_parts)
+	var exports: Array = []
+	var export_variant: Variant = PORT_EXPORT_CARGO.get(port_name, [])
+	if export_variant is Array:
+		exports = export_variant
+	var export_text := ", ".join(exports) if not exports.is_empty() else "Unknown"
+	var status := "At sea"
+	if port_menu_docked and current_port_menu_port == port_name:
+		status = "Docked"
+	elif current_port_menu_port == port_name:
+		status = "Off the coast"
+	elif last_arrived_port == port_name:
+		status = "Last visited"
+	return "%s\nControlling faction: %s\nFaction Reputation: %d\nRegional wars: %s\nStatus: %s\nExports: %s\n\nUse port menus to trade, recruit, petition the governor, attack, or return to sea." % [
+		port_name,
+		faction,
+		rep_value,
+		wars_text,
+		status,
+		export_text
+	]
+
+func _stats_text(stats: Variant) -> String:
+	if not (stats is Dictionary):
+		return "None"
+	var parts: Array[String] = []
+	for key in (stats as Dictionary).keys():
+		parts.append("%s %d" % [str(key), int((stats as Dictionary)[key])])
+	parts.sort()
+	return ", ".join(parts)
+
+func _gear_text(gear: Variant) -> String:
+	if not (gear is Dictionary):
+		return "None"
+	var parts: Array[String] = []
+	for key in (gear as Dictionary).keys():
+		parts.append("%s: %s" % [str(key), str((gear as Dictionary)[key])])
+	parts.sort()
+	return ", ".join(parts)
 
 func _on_main_menu_settings_pressed() -> void:
 	main_menu_panel.visible = false
@@ -1964,6 +3263,413 @@ func _begin_gameplay_from_main_menu() -> void:
 	escape_menu_layer.visible = false
 	encounter_active = false
 	encounter_layer.visible = false
+	_close_port_menu()
+	_close_main_map_info()
+	_ensure_crew_roster()
+
+func _reset_port_economy_state() -> void:
+	player_piasters = 1800
+	ship_supplies = 40
+	ship_cargo = 18
+	cargo_manifest.clear()
+	crew_roster_size = 42
+	governor_favor = 0
+	active_governor_task = ""
+	crew_officers.clear()
+	boarding_party_roster.clear()
+	_ensure_crew_roster()
+	_reset_career_state()
+
+func _reset_career_state() -> void:
+	career_state = {
+		"fame": 0,
+		"rank_title": "Deckhand",
+		"treasure_map_name": "",
+		"family_stage": 0,
+		"family_rescued": false,
+		"treasure_target_port": "",
+		"treasure_ready": false,
+		"treasure_in_progress": false,
+		"treasure_completed": false,
+		"captain_start_age": 22.0,
+		"captain_age": 22.0,
+		"aging_penalty": 0.0,
+		"crew_morale": 70,
+		"last_pressure_month_index": world_map.game_year * 12 + world_map.game_month,
+		"start_year": world_map.game_year,
+		"start_month": world_map.game_month,
+		"faction_reputation": {
+			"Spanish": 0,
+			"English": 0,
+			"French": 0,
+			"Dutch": 0
+		},
+		"port_ownership": _rebuild_port_ownership_from_world_map(),
+		"active_wars": [],
+		"world_politics_last_tick_month": world_map.game_year * 12 + world_map.game_month
+	}
+	_sync_port_ownership_to_world_map()
+
+func _get_faction_reputation_dict_from_career() -> Dictionary:
+	var v: Variant = career_state.get("faction_reputation", {})
+	if v is Dictionary:
+		return v as Dictionary
+	return {}
+
+func _ensure_career_state_defaults() -> void:
+	if career_state.is_empty():
+		_reset_career_state()
+	if not career_state.has("captain_start_age"):
+		career_state["captain_start_age"] = 22.0
+	if not career_state.has("captain_age"):
+		career_state["captain_age"] = float(career_state.get("captain_start_age", 22.0))
+	if not career_state.has("aging_penalty"):
+		career_state["aging_penalty"] = 0.0
+	if not career_state.has("crew_morale"):
+		career_state["crew_morale"] = 70
+	if not career_state.has("start_year"):
+		career_state["start_year"] = world_map.game_year
+	if not career_state.has("start_month"):
+		career_state["start_month"] = world_map.game_month
+	if not career_state.has("last_pressure_month_index"):
+		career_state["last_pressure_month_index"] = world_map.game_year * 12 + world_map.game_month
+	if not career_state.has("faction_reputation"):
+		career_state["faction_reputation"] = {}
+	var rep_base: Dictionary = _get_faction_reputation_dict_from_career()
+	var copy_rep: Dictionary = rep_base.duplicate(true)
+	for faction_name in FACTION_LIST:
+		if not copy_rep.has(faction_name):
+			copy_rep[faction_name] = 0
+	career_state["faction_reputation"] = copy_rep
+	var po_variant: Variant = career_state.get("port_ownership", {})
+	if not po_variant is Dictionary or (po_variant as Dictionary).is_empty():
+		career_state["port_ownership"] = _rebuild_port_ownership_from_world_map()
+	else:
+		var po: Dictionary = (po_variant as Dictionary).duplicate(true)
+		var rebuilt: Dictionary = _rebuild_port_ownership_from_world_map()
+		for pname in rebuilt.keys():
+			if not po.has(pname):
+				po[pname] = rebuilt[pname]
+		career_state["port_ownership"] = po
+	if not career_state.has("active_wars") or not (career_state.get("active_wars") is Array):
+		career_state["active_wars"] = []
+	if not career_state.has("world_politics_last_tick_month"):
+		career_state["world_politics_last_tick_month"] = world_map.game_year * 12 + world_map.game_month
+	_ensure_market_quotes_defaults()
+	_sync_port_ownership_to_world_map()
+
+func _rebuild_port_ownership_from_world_map() -> Dictionary:
+	var out: Dictionary = {}
+	for port_name in world_map.ports.keys():
+		var data_variant: Variant = world_map.ports[port_name]
+		if data_variant is Dictionary:
+			var pdata: Dictionary = data_variant
+			if pdata.has("faction"):
+				out[port_name] = str(pdata["faction"])
+	return out
+
+func _sync_port_ownership_to_world_map() -> void:
+	if world_map == null:
+		return
+	var po_variant: Variant = career_state.get("port_ownership", {})
+	if po_variant is Dictionary:
+		world_map.set_port_owner_overrides(po_variant as Dictionary)
+
+func _current_port_controller_faction(port_name: String) -> String:
+	_ensure_career_state_defaults()
+	var owners: Variant = career_state.get("port_ownership", {})
+	if owners is Dictionary and (owners as Dictionary).has(port_name):
+		return str((owners as Dictionary)[port_name])
+	if world_map.ports.has(port_name):
+		var pdata: Variant = world_map.ports[port_name]
+		if pdata is Dictionary:
+			return str((pdata as Dictionary).get("faction", "Unknown"))
+	return "Unknown"
+
+func _faction_pair_at_war(wars: Array, a: String, b: String) -> bool:
+	for w in wars:
+		if not w is Dictionary:
+			continue
+		var d: Dictionary = w as Dictionary
+		var x := str(d.get("a", ""))
+		var y := str(d.get("b", ""))
+		if (x == a and y == b) or (x == b and y == a):
+			return true
+	return false
+
+func _roll_new_war_pair(existing: Array) -> Array:
+	for _t in range(24):
+		var fa: Array = FACTION_LIST.duplicate()
+		fa.shuffle()
+		var a := str(fa[0])
+		var b := str(fa[1])
+		if a == b:
+			continue
+		if _faction_pair_at_war(existing, a, b):
+			continue
+		return [a, b]
+	return []
+
+func _maybe_flip_port_from_war(wars: Array, owners: Dictionary) -> String:
+	if wars.is_empty():
+		return ""
+	var w: Dictionary = wars[randi_range(0, wars.size() - 1)]
+	var fa := str(w.get("a", ""))
+	var fb := str(w.get("b", ""))
+	if fa == "" or fb == "":
+		return ""
+	var port_names: Array[String] = world_map.get_port_names()
+	port_names.shuffle()
+	for port_name in port_names:
+		var cur := str(owners.get(port_name, ""))
+		if cur != fa and cur != fb:
+			continue
+		var attacker := fb if cur == fa else fa
+		if randf() > 0.32:
+			return ""
+		owners[port_name] = attacker
+		_apply_faction_reputation_delta(attacker, 3, "news: colors over %s" % port_name)
+		_apply_faction_reputation_delta(cur, -4, "news: lost influence at %s" % port_name)
+		return "Rumors say %s now answers to %s governors (war in the settlements)." % [port_name, attacker]
+	return ""
+
+func _roll_world_politics_pulse() -> void:
+	_ensure_career_state_defaults()
+	var po_v: Variant = career_state.get("port_ownership", {})
+	var owners: Dictionary = (po_v as Dictionary).duplicate(true) if po_v is Dictionary else _rebuild_port_ownership_from_world_map()
+	var wars: Array = []
+	var war_src: Variant = career_state.get("active_wars", [])
+	if war_src is Array:
+		for item in war_src as Array:
+			if item is Dictionary:
+				wars.append((item as Dictionary).duplicate(true))
+	var lines: Array[String] = []
+	if wars.size() < 3 and randf() < 0.12:
+		var pair: Array = _roll_new_war_pair(wars)
+		if pair.size() == 2:
+			wars.append({"a": str(pair[0]), "b": str(pair[1])})
+			lines.append("War spreads: %s and %s are raiding each other's flags." % [str(pair[0]), str(pair[1])])
+	if wars.size() > 0 and randf() < 0.09:
+		var idx := randi_range(0, wars.size() - 1)
+		var ended_v: Variant = wars[idx]
+		wars.remove_at(idx)
+		if ended_v is Dictionary:
+			var ended: Dictionary = ended_v as Dictionary
+			lines.append("Treaty: %s and %s sue for peace (for now)." % [str(ended.get("a", "?")), str(ended.get("b", "?"))])
+	if wars.size() > 0 and randf() < 0.14:
+		var flip_line := _maybe_flip_port_from_war(wars, owners)
+		if flip_line != "":
+			lines.append(flip_line)
+	career_state["active_wars"] = wars
+	career_state["port_ownership"] = owners
+	_sync_port_ownership_to_world_map()
+	for line in lines:
+		game_flow.post_message(line)
+
+func _tick_world_politics_if_due(month_index: int) -> void:
+	_ensure_career_state_defaults()
+	var last_tick := int(career_state.get("world_politics_last_tick_month", month_index))
+	if month_index < last_tick:
+		career_state["world_politics_last_tick_month"] = month_index
+		return
+	var max_pulses := 2
+	var pulses := 0
+	while month_index - last_tick >= WORLD_POLITICS_INTERVAL_MONTHS and pulses < max_pulses:
+		last_tick += WORLD_POLITICS_INTERVAL_MONTHS
+		_roll_world_politics_pulse()
+		pulses += 1
+	if last_tick > month_index:
+		last_tick = month_index
+	career_state["world_politics_last_tick_month"] = last_tick
+
+func _on_world_map_month_advanced(month_index: int) -> void:
+	if in_main_menu:
+		return
+	_tick_world_politics_if_due(month_index)
+	_tick_port_markets_for_month()
+
+func _award_career_fame(amount: int, reason: String) -> void:
+	if amount <= 0:
+		return
+	_ensure_career_state_defaults()
+	var aging_penalty: float = clampf(float(career_state.get("aging_penalty", 0.0)), 0.0, 0.45)
+	var morale_factor: float = clampf(0.7 + (float(int(career_state.get("crew_morale", 70))) / 100.0) * 0.5, 0.7, 1.2)
+	var adjusted_amount: int = maxi(1, int(round(float(amount) * (1.0 - aging_penalty) * morale_factor)))
+	var new_fame: int = int(career_state.get("fame", 0)) + adjusted_amount
+	career_state["fame"] = new_fame
+	var prior_rank: String = str(career_state.get("rank_title", "Deckhand"))
+	var new_rank: String = str(CareerSystemScript.rank_for_fame(new_fame))
+	career_state["rank_title"] = new_rank
+	game_flow.post_message("Career: +%d fame (%s)." % [adjusted_amount, reason])
+	if new_rank != prior_rank:
+		game_flow.post_message("Promotion earned: %s." % new_rank)
+
+func _try_award_map_fragment(chance: float, source_text: String = "Treasure map recovered") -> void:
+	if chance <= 0.0 or randf() > chance:
+		return
+	if career_state.is_empty():
+		_reset_career_state()
+	if bool(career_state.get("treasure_ready", false)) or bool(career_state.get("treasure_in_progress", false)):
+		return
+	var map_name := "Admiral's Coded Chart"
+	career_state["treasure_map_name"] = map_name
+	_assign_treasure_hunt_destination()
+	_award_career_fame(24, "Recovered complete treasure map")
+	var treasure_port := str(career_state.get("treasure_target_port", "unknown waters"))
+	game_flow.post_message("%s: %s. The chart points to hidden treasure near %s." % [source_text, map_name, treasure_port])
+
+func _advance_family_rescue_progress(source_text: String) -> void:
+	if career_state.is_empty():
+		_reset_career_state()
+	if bool(career_state.get("family_rescued", false)):
+		return
+	var stage := int(career_state.get("family_stage", 0))
+	if stage >= 4:
+		career_state["family_rescued"] = true
+		_award_career_fame(120, "Family rescued")
+		active_governor_task = "Family reunited"
+		game_flow.post_message("Major milestone: your missing family has been rescued.")
+		return
+	stage += 1
+	career_state["family_stage"] = stage
+	_award_career_fame(22, "Family rescue lead")
+	var stage_text := "Lead %d/4 toward family rescue." % stage
+	game_flow.post_message("%s %s" % [source_text, stage_text])
+
+func _update_aging_and_career_pressure() -> void:
+	_ensure_career_state_defaults()
+	var month_index: int = world_map.game_year * 12 + world_map.game_month
+	var start_year: int = int(career_state.get("start_year", world_map.game_year))
+	var start_month: int = int(career_state.get("start_month", world_map.game_month))
+	var elapsed_months: int = maxi(0, month_index - (start_year * 12 + start_month))
+	var base_age: float = float(career_state.get("captain_start_age", 22.0))
+	var captain_age: float = base_age + (float(elapsed_months) / 12.0)
+	career_state["captain_age"] = captain_age
+	var penalty: float = clampf((captain_age - 36.0) / 40.0, 0.0, 0.45)
+	career_state["aging_penalty"] = penalty
+
+	var last_pressure_index: int = int(career_state.get("last_pressure_month_index", month_index))
+	if month_index <= last_pressure_index:
+		return
+	var months_due: int = month_index - last_pressure_index
+	var morale: int = int(career_state.get("crew_morale", 70))
+	for _i in range(months_due):
+		var monthly_wage: int = 35 + int(round(float(crew_roster_size) * 1.8))
+		if player_piasters >= monthly_wage:
+			player_piasters -= monthly_wage
+			morale = mini(100, morale + 1)
+		else:
+			var missing: int = monthly_wage - player_piasters
+			player_piasters = 0
+			morale = maxi(0, morale - 6)
+			if morale <= 24 and crew_roster_size > 12:
+				crew_roster_size = maxi(12, crew_roster_size - 1)
+				game_flow.post_message("Career pressure: one pirate deserted over unpaid shares.")
+			career_state["fame"] = maxi(0, int(career_state.get("fame", 0)) - 2)
+			game_flow.post_message("Career pressure: unpaid wages short by %d pieces of eight hurt morale." % missing)
+	career_state["crew_morale"] = morale
+	career_state["last_pressure_month_index"] = month_index
+	if months_due > 0:
+		game_flow.post_message("Monthly crew payroll settled for %d month(s). Morale now %d." % [months_due, morale])
+
+func _random_enemy_faction() -> String:
+	var candidates: Array = FACTION_LIST.duplicate()
+	candidates.shuffle()
+	return str(candidates[0])
+
+func _apply_faction_reputation_delta(faction: String, delta: int, reason: String) -> void:
+	if faction == "" or delta == 0:
+		return
+	_ensure_career_state_defaults()
+	var rep_dict: Dictionary = _get_faction_reputation_dict_from_career()
+	var current_value := int(rep_dict.get(faction, 0))
+	var next_value := clampi(current_value + delta, -100, 100)
+	rep_dict[faction] = next_value
+	career_state["faction_reputation"] = rep_dict
+	var delta_text := "+%d" % delta if delta > 0 else str(delta)
+	game_flow.post_message("Faction reputation (%s): %s (%s). New standing %d." % [faction, delta_text, reason, next_value])
+
+func _apply_ship_battle_faction_reputation(player_won: bool) -> void:
+	var enemy_faction := last_ship_battle_enemy_faction
+	if enemy_faction == "" or enemy_faction == "Unknown":
+		return
+	if last_ship_battle_player_aggressor:
+		_apply_faction_reputation_delta(enemy_faction, -12, "attacked their shipping")
+		if player_won:
+			_apply_faction_reputation_delta(enemy_faction, -6, "sank or captured their ship")
+	else:
+		if player_won:
+			_apply_faction_reputation_delta(enemy_faction, -3, "defeated one of their captains in self-defense")
+			for faction_name in FACTION_LIST:
+				if faction_name == enemy_faction:
+					continue
+				_apply_faction_reputation_delta(faction_name, 2, "eliminated a hostile raider")
+
+func _can_launch_treasure_at_port(port_name: String) -> bool:
+	if port_name == "":
+		return false
+	if career_state.is_empty():
+		_reset_career_state()
+	if bool(career_state.get("treasure_completed", false)):
+		return false
+	return bool(career_state.get("treasure_ready", false)) and str(career_state.get("treasure_target_port", "")) == port_name
+
+func _assign_treasure_hunt_destination() -> void:
+	if career_state.is_empty():
+		_reset_career_state()
+	var port_names: Array[String] = world_map.get_port_names()
+	if port_names.is_empty():
+		return
+	port_names.shuffle()
+	var chosen_port := port_names[0]
+	career_state["treasure_target_port"] = chosen_port
+	career_state["treasure_ready"] = true
+	career_state["treasure_in_progress"] = false
+	career_state["treasure_completed"] = false
+	active_governor_task = "Treasure map assembled - search near %s" % chosen_port
+
+func _launch_treasure_expedition(port_name: String) -> void:
+	if not _can_launch_treasure_at_port(port_name):
+		return
+	career_state["treasure_in_progress"] = true
+	_close_port_menu()
+	last_arrived_port = port_name
+	can_start_town_assault = true
+	game_flow.post_message("Launching treasure expedition near %s. Secure the site." % port_name)
+	_start_town_assault_demo()
+
+func _resolve_treasure_expedition_success() -> void:
+	if career_state.is_empty():
+		_reset_career_state()
+	career_state["treasure_in_progress"] = false
+	career_state["treasure_ready"] = false
+	career_state["treasure_completed"] = true
+	career_state["treasure_target_port"] = ""
+	career_state["treasure_map_name"] = ""
+	var reward := randi_range(900, 1800)
+	player_piasters += reward
+	_award_career_fame(95, "Treasure expedition success")
+	active_governor_task = "Treasure recovered"
+	game_flow.post_message("Treasure secured: %d pieces of eight recovered from the hidden cache." % reward)
+
+func _ensure_crew_roster() -> void:
+	if crew_officers.is_empty():
+		crew_officers = [
+			{"role": "Pilot / Navigator", "name": "Elias Reed", "stats": {"Navigation": 3, "Charting": 2, "Weather Eye": 2}, "duty": "Raises Navigation by completing voyages, evasive maneuvers, and landfall approaches."},
+			{"role": "Crow's Nest / Spotter", "name": "Mara Finch", "stats": {"Spotting": 3, "Signals": 2, "Night Watch": 1}, "duty": "Raises Spotting by detecting sails, reefs, and ambushes before they close."},
+			{"role": "Quartermaster", "name": "Tom Vane", "stats": {"Rationing": 3, "Morale": 2, "Discipline": 2}, "duty": "Raises Rationing and Morale by keeping supplies stable and prize shares fair."},
+			{"role": "Boatswain", "name": "Anne Pike", "stats": {"Rigging": 3, "Deck Drill": 2, "Repairs": 1}, "duty": "Raises Rigging through sail handling, storm work, and fast combat maneuvers."},
+			{"role": "Master Gunner", "name": "Silas Crowe", "stats": {"Gunnery": 3, "Reload Drill": 2, "Powder Safety": 2}, "duty": "Raises Gunnery by firing broadsides, conserving powder, and drilling crews."},
+			{"role": "Carpenter", "name": "Bea Hull", "stats": {"Carpentry": 3, "Patching": 2, "Salvage": 1}, "duty": "Raises Carpentry by repairing battle damage and keeping the hull seaworthy."},
+			{"role": "Ship Doctor", "name": "Dr. Iris Fen", "stats": {"Medicine": 3, "Surgery": 2, "Recovery": 2}, "duty": "Raises Medicine by treating battle wounds, disease, and long-voyage exhaustion among the crew."}
+		]
+	if boarding_party_roster.is_empty():
+		boarding_party_roster = [
+			{"name": "Mateo Cruz", "role": "Cutlass Lead", "stats": {"Melee": 3, "Pistol": 2, "Grit": 3}, "gear": {"Melee": "Balanced cutlass", "Ranged": "Sea-service pistol", "Armor": "Leather jerkin"}},
+			{"name": "Ivy Marsh", "role": "Pistolier", "stats": {"Melee": 2, "Pistol": 3, "Grit": 2}, "gear": {"Melee": "Boarding axe", "Ranged": "Pair of pistols", "Armor": "Heavy coat"}},
+			{"name": "Jonah Flint", "role": "Breacher", "stats": {"Melee": 3, "Pistol": 1, "Grit": 4}, "gear": {"Melee": "Boarding axe", "Ranged": "Blunderbuss", "Armor": "Padded vest"}},
+			{"name": "Nell Sharp", "role": "Skirmisher", "stats": {"Melee": 2, "Pistol": 3, "Grit": 2}, "gear": {"Melee": "Short sword", "Ranged": "Long pistol", "Armor": "Sash and coat"}}
+		]
 
 func _encounter_escape_chance(data: Dictionary) -> float:
 	var player_speed: float = float(data.get("player_speed_knots", 4.5))
@@ -1993,6 +3699,8 @@ func _begin_ship_battle_from_encounter(log_text: String) -> void:
 	var context: Dictionary = pending_encounter.duplicate()
 	encounter_active = false
 	encounter_layer.visible = false
+	last_ship_battle_enemy_faction = str(context.get("enemy_faction", "Unknown"))
+	last_ship_battle_player_aggressor = bool(context.get("player_is_aggressor", false))
 	pending_encounter.clear()
 	game_flow.post_message(log_text)
 	_set_mode(GameFlow.Mode.SHIP_COMBAT)
@@ -2163,6 +3871,16 @@ func _save_game() -> bool:
 		"captain_log_lines": captain_log_lines,
 		"last_arrived_port": last_arrived_port,
 		"can_start_town_assault": can_start_town_assault,
+		"player_piasters": player_piasters,
+		"ship_supplies": ship_supplies,
+		"ship_cargo": ship_cargo,
+		"cargo_manifest": cargo_manifest,
+		"crew_roster_size": crew_roster_size,
+		"crew_officers": crew_officers,
+		"boarding_party_roster": boarding_party_roster,
+		"governor_favor": governor_favor,
+		"active_governor_task": active_governor_task,
+		"career_state": career_state,
 		"mode": game_flow.current_mode,
 		"tactical_type": game_flow.tactical_type
 	}
@@ -2197,6 +3915,40 @@ func _load_game() -> bool:
 		last_arrived_port = str(data["last_arrived_port"])
 	if data.has("can_start_town_assault"):
 		can_start_town_assault = bool(data["can_start_town_assault"])
+	if data.has("player_piasters"):
+		player_piasters = int(data["player_piasters"])
+	if data.has("ship_supplies"):
+		ship_supplies = int(data["ship_supplies"])
+	if data.has("ship_cargo"):
+		ship_cargo = int(data["ship_cargo"])
+	if data.has("cargo_manifest") and data["cargo_manifest"] is Dictionary:
+		cargo_manifest = (data["cargo_manifest"] as Dictionary).duplicate(true)
+	if data.has("crew_roster_size"):
+		crew_roster_size = int(data["crew_roster_size"])
+	if data.has("crew_officers") and data["crew_officers"] is Array:
+		crew_officers.clear()
+		for item in data["crew_officers"]:
+			if item is Dictionary:
+				crew_officers.append((item as Dictionary).duplicate(true))
+	if data.has("boarding_party_roster") and data["boarding_party_roster"] is Array:
+		boarding_party_roster.clear()
+		for item in data["boarding_party_roster"]:
+			if item is Dictionary:
+				boarding_party_roster.append((item as Dictionary).duplicate(true))
+	_ensure_crew_roster()
+	if data.has("governor_favor"):
+		governor_favor = int(data["governor_favor"])
+	if data.has("active_governor_task"):
+		active_governor_task = str(data["active_governor_task"])
+	if data.has("career_state") and data["career_state"] is Dictionary:
+		career_state = (data["career_state"] as Dictionary).duplicate(true)
+		if not career_state.has("treasure_map_name"):
+			career_state["treasure_map_name"] = ""
+		if career_state.has("map_fragments"):
+			career_state.erase("map_fragments")
+	else:
+		_reset_career_state()
+	_ensure_career_state_defaults()
 	if data.has("tactical_type"):
 		game_flow.set_tactical_type(int(data["tactical_type"]))
 	if data.has("mode"):
@@ -2212,11 +3964,11 @@ func _load_game() -> bool:
 	_layout_worldmap_ui()
 	return true
 
-func _on_time_scale_selected(scale: float) -> void:
-	world_map.set_time_scale(scale)
+func _on_time_scale_selected(time_scale: float) -> void:
+	world_map.set_time_scale(time_scale)
 	for key in time_buttons.keys():
 		var button: Button = time_buttons[key]
-		button.button_pressed = int(key) == int(scale)
+		button.button_pressed = int(key) == int(time_scale)
 
 func _layout_worldmap_ui() -> void:
 	var viewport_size := get_viewport_rect().size
@@ -2231,6 +3983,10 @@ func _layout_worldmap_ui() -> void:
 	if left_sidebar_panel != null:
 		left_sidebar_panel.position = Vector2(0, 0)
 		left_sidebar_panel.size = Vector2(sidebar_width, map_height)
+
+	if left_sidebar_menu_box != null:
+		left_sidebar_menu_box.position = Vector2(12.0, 52.0)
+		left_sidebar_menu_box.size = Vector2(maxf(80.0, sidebar_width - 24.0), maxf(80.0, map_height - 64.0))
 
 	if captain_log_panel != null:
 		captain_log_panel.position = Vector2(0.0, viewport_size.y - safe_log_height)
@@ -2273,6 +4029,38 @@ func _layout_worldmap_ui() -> void:
 			maxf(20.0, map_height * 0.18)
 		)
 
+	if main_map_info_overlay != null:
+		main_map_info_overlay.position = Vector2.ZERO
+		main_map_info_overlay.size = viewport_size
+
+	if main_map_info_panel != null:
+		var panel_width: float = minf(700.0, maxf(320.0, viewport_size.x - sidebar_width - 48.0))
+		var panel_height: float = minf(520.0, maxf(280.0, map_height - 36.0))
+		main_map_info_panel.custom_minimum_size = Vector2(panel_width, panel_height)
+		main_map_info_panel.size = main_map_info_panel.custom_minimum_size
+		main_map_info_panel.position = Vector2(
+			sidebar_width + ((viewport_size.x - sidebar_width) - main_map_info_panel.size.x) * 0.5,
+			maxf(18.0, (map_height - main_map_info_panel.size.y) * 0.5)
+		)
+		if main_map_info_text_label != null:
+			main_map_info_text_label.custom_minimum_size = Vector2(panel_width - 40.0, maxf(160.0, panel_height - 118.0))
+		if main_map_info_x_button != null:
+			main_map_info_x_button.position = Vector2(main_map_info_panel.size.x - 38.0, 8.0)
+
+	if port_menu_layer != null and port_menu_layer.get_child_count() > 0:
+		var menu_overlay: Node = port_menu_layer.get_child(0)
+		if menu_overlay is ColorRect:
+			var overlay_rect: ColorRect = menu_overlay
+			overlay_rect.position = Vector2.ZERO
+			overlay_rect.size = viewport_size
+
+	if port_menu_panel != null:
+		port_menu_panel.custom_minimum_size = Vector2(620.0, 500.0)
+		port_menu_panel.size = port_menu_panel.custom_minimum_size
+		port_menu_panel.position = Vector2(
+			sidebar_width + ((viewport_size.x - sidebar_width) - port_menu_panel.size.x) * 0.5,
+			maxf(18.0, map_height * 0.08)
+		)
 	if main_menu_layer != null and main_menu_layer.get_child_count() > 0:
 		var overlay: Node = main_menu_layer.get_child(0)
 		if overlay is ColorRect:

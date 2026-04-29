@@ -3,6 +3,8 @@ class_name WorldMap
 
 signal destination_arrived(port_name: String)
 signal random_encounter_triggered
+## Emitted once each time the calendar advances to a new month (year*12+month, month 1–12).
+signal game_month_advanced(month_index: int)
 
 @export var auto_sail_speed: float = 120.0
 @export var encounter_check_interval: float = 2.0
@@ -53,21 +55,33 @@ var game_day: float = 1.0
 var wind_cols: int = 0
 var wind_rows: int = 0
 var wind_tiles: Dictionary = {}
-var nav_cell_size: float = 42.0
+var nav_cell_size: float = 34.0
 var nav_cols: int = 0
 var nav_rows: int = 0
 var nav_blocked: Dictionary = {}
 var route_points: Array[Vector2] = []
+var route_segment_colors: Array[Color] = []
 var route_index: int = 0
 var hover_eta_hours: float = -1.0
 var hover_world_pos: Vector2 = Vector2.ZERO
 var hover_has_eta: bool = false
 var last_hover_cell: Vector2i = Vector2i(-9999, -9999)
+var next_hover_eta_msec: int = 0
+var land_baked_texture: Texture2D
+var use_vector_land: bool = true
+## CPU copy of baked land for O(1) land tests (pathfinding, coast sampling). Null if no bake.
+var _land_collision_image: Image
+var _layer_under: Node2D
+var _layer_dynamic: Node2D
+var _layer_over: Node2D
+## Runtime port controller; keys are port names, values faction strings. Filled from career save.
+var port_owner_overrides: Dictionary = {}
 
 const MAP_BG := Color(0.08, 0.2, 0.32)
 const LAND_COLOR := Color(0.83, 0.76, 0.58)
 const LAND_SHADE := Color(0.72, 0.66, 0.5)
 const SHIP_COLOR := Color(0.95, 0.95, 1.0)
+const WIND_GUIDE_RADIUS := 26.0
 const FACTION_COLORS := {
 	"Spanish": Color(0.93, 0.77, 0.26),
 	"English": Color(0.88, 0.2, 0.2),
@@ -79,7 +93,11 @@ var left_gutter_width: float = 96.0
 var log_band_height: float = 220.0
 const MAP_OUTSIDE_COLOR := Color(0.02, 0.03, 0.05)
 const LAND_DATA_PATH := "res://data/caribbean_land.json"
+const LAND_BAKED_PATH := "res://data/land_baked.png"
 const WIND_DATA_PATH := "res://data/wind_tiles_monthly.json"
+const _MapUnderLayer := preload("res://scripts/world_map_under_layer.gd")
+const _MapDynamicLayer := preload("res://scripts/world_map_dynamic_layer.gd")
+const _MapOverLayer := preload("res://scripts/world_map_over_layer.gd")
 
 const HISTORICAL_BENCHMARKS := [
 	{"from": "Nassau", "to": "Havana", "days": 4.0},
@@ -155,12 +173,14 @@ func _ready() -> void:
 	set_as_top_level(true)
 	global_position = Vector2.ZERO
 	_load_land_data()
+	_load_land_baked()
 	_load_wind_data()
 	_build_navigation_grid()
 	if auto_calibrate_historical_speed:
 		_apply_historical_speed_calibration()
 	_clamp_view_offset()
-	queue_redraw()
+	_setup_canvas_layers()
+	_refresh_view_canvases()
 
 func _process(delta: float) -> void:
 	var sim_delta := delta * player_time_scale
@@ -170,12 +190,12 @@ func _process(delta: float) -> void:
 	if not is_traveling:
 		return
 
-	var to_target := target_position - current_position
 	if route_points.is_empty() or route_index >= route_points.size() - 1:
-		current_position = target_position
+		if not _segment_hits_land(current_position, target_position):
+			current_position = target_position
 		is_traveling = false
 		emit_signal("destination_arrived", target_port_name)
-		queue_redraw()
+		_refresh_dynamic_canvas()
 		return
 
 	var remaining_step := _current_travel_speed_map_units_per_second(_travel_heading_or_default()) * sim_delta
@@ -195,10 +215,11 @@ func _process(delta: float) -> void:
 			remaining_step = 0.0
 
 	if route_index >= route_points.size() - 1 and current_position.distance_to(target_position) <= nav_cell_size:
-		current_position = target_position
+		if not _segment_hits_land(current_position, target_position):
+			current_position = target_position
 		is_traveling = false
 		emit_signal("destination_arrived", target_port_name)
-		queue_redraw()
+		_refresh_dynamic_canvas()
 		return
 
 	travel_accumulator += sim_delta
@@ -209,9 +230,46 @@ func _process(delta: float) -> void:
 			is_traveling = false
 			emit_signal("random_encounter_triggered")
 
-	queue_redraw()
+	_refresh_dynamic_canvas()
 
-func _draw() -> void:
+func _setup_canvas_layers() -> void:
+	var under := _MapUnderLayer.new()
+	under.name = "MapUnder"
+	under.world_map = self
+	under.z_index = 0
+	add_child(under)
+	_layer_under = under
+
+	var dyn := _MapDynamicLayer.new()
+	dyn.name = "MapDynamic"
+	dyn.world_map = self
+	dyn.z_index = 1
+	add_child(dyn)
+	_layer_dynamic = dyn
+
+	var over := _MapOverLayer.new()
+	over.name = "MapOver"
+	over.world_map = self
+	over.z_index = 2
+	add_child(over)
+	_layer_over = over
+
+
+func _refresh_dynamic_canvas() -> void:
+	if _layer_dynamic != null:
+		_layer_dynamic.queue_redraw()
+
+
+func _refresh_view_canvases() -> void:
+	if _layer_under != null:
+		_layer_under.queue_redraw()
+	if _layer_dynamic != null:
+		_layer_dynamic.queue_redraw()
+	if _layer_over != null:
+		_layer_over.queue_redraw()
+
+
+func draw_under_canvas(ci: CanvasItem) -> void:
 	var map_rect := _map_rect()
 	var map_poly := PackedVector2Array([
 		map_rect.position,
@@ -219,32 +277,11 @@ func _draw() -> void:
 		map_rect.position + map_rect.size,
 		map_rect.position + Vector2(0.0, map_rect.size.y)
 	])
-	draw_rect(map_rect, MAP_BG, true)
-
-	for polygon in americas_polygons:
-		var transformed := PackedVector2Array()
-		for point in polygon:
-			transformed.append(_world_to_screen(point))
-		var clipped_parts: Array = Geometry2D.intersect_polygons(transformed, map_poly)
-		for part_variant in clipped_parts:
-			if not (part_variant is PackedVector2Array):
-				continue
-			var part: PackedVector2Array = part_variant
-			if part.size() >= 3:
-				draw_colored_polygon(part, LAND_COLOR)
-
-	# Coast outline using the same geometry as fill.
-	for polygon in americas_polygons:
-		var transformed := PackedVector2Array()
-		for point in polygon:
-			transformed.append(_world_to_screen(point))
-		var clipped_parts: Array = Geometry2D.intersect_polygons(transformed, map_poly)
-		for part_variant in clipped_parts:
-			if not (part_variant is PackedVector2Array):
-				continue
-			var part: PackedVector2Array = part_variant
-			if part.size() >= 2:
-				draw_polyline(part, LAND_SHADE, 2.0, true)
+	ci.draw_rect(map_rect, MAP_BG, true)
+	if not use_vector_land and land_baked_texture != null:
+		_draw_baked_land_layer(ci, map_rect)
+	else:
+		_draw_vector_land(ci, map_poly)
 
 	for port_name in ports.keys():
 		var pos: Vector2 = _world_to_screen(_port_position(port_name))
@@ -252,44 +289,105 @@ func _draw() -> void:
 			continue
 		var faction: String = _port_faction(port_name)
 		var color: Color = FACTION_COLORS.get(faction, Color(0.9, 0.85, 0.55))
-		draw_circle(pos, 8.0, color)
-		draw_string(ThemeDB.fallback_font, pos + Vector2(12, 6), port_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 16)
+		ci.draw_circle(pos, 8.0, color)
+		ci.draw_string(ThemeDB.fallback_font, pos + Vector2(12, 6), port_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 16)
 
+
+func draw_dynamic_canvas(ci: CanvasItem) -> void:
+	var map_rect := _map_rect()
 	var ship_screen := _world_to_screen(current_position)
-	draw_circle(ship_screen, 7.0, SHIP_COLOR)
-	draw_string(ThemeDB.fallback_font, ship_screen + Vector2(10, -10), "Player Ship", HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
+	ci.draw_circle(ship_screen, 7.0, SHIP_COLOR)
+	ci.draw_string(ThemeDB.fallback_font, ship_screen + Vector2(10, -10), "Player Ship", HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
+	_draw_wind_at_ship_guide(ci, map_rect, ship_screen)
 
 	if is_traveling:
 		var prev_world := current_position
 		for i in range(route_index + 1, route_points.size()):
 			var next_world := route_points[i]
-			var seg_color := _route_segment_color(prev_world, next_world)
-			draw_line(_world_to_screen(prev_world), _world_to_screen(next_world), seg_color, 2.5, true)
+			var color_idx := i - 1
+			var seg_color: Color = route_segment_colors[color_idx] if color_idx >= 0 and color_idx < route_segment_colors.size() else _route_segment_color(prev_world, next_world)
+			ci.draw_line(_world_to_screen(prev_world), _world_to_screen(next_world), seg_color, 2.5, true)
 			prev_world = next_world
+		if prev_world.distance_to(target_position) > 0.5:
+			var final_color := _route_segment_color(prev_world, target_position)
+			ci.draw_line(_world_to_screen(prev_world), _world_to_screen(target_position), final_color, 2.5, true)
 
 	var controls := "Map Controls: Middle/Right drag pan | Mouse wheel zoom"
-	draw_string(ThemeDB.fallback_font, map_rect.position + Vector2(16, 24), controls, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
+	ci.draw_string(ThemeDB.fallback_font, map_rect.position + Vector2(16, 24), controls, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
 	var date_line := "Date: %s %d, %d" % [_month_name(game_month), int(floor(game_day)), game_year]
-	draw_string(ThemeDB.fallback_font, map_rect.position + Vector2(16, 48), date_line, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
+	ci.draw_string(ThemeDB.fallback_font, map_rect.position + Vector2(16, 48), date_line, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
 	var speed_line := "Travel Speed: %.1f kn" % _current_travel_speed_knots(_travel_heading_or_default(), current_position)
-	draw_string(ThemeDB.fallback_font, map_rect.position + Vector2(16, 72), speed_line, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
-	if hover_has_eta and hover_eta_hours >= 0.0:
+	ci.draw_string(ThemeDB.fallback_font, map_rect.position + Vector2(16, 72), speed_line, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
+	if is_traveling:
+		var remaining_nm := _remaining_route_nautical_miles()
+		var remaining_hours := _remaining_route_hours()
+		var eta_days := int(floor(remaining_hours / 24.0))
+		var eta_hours := int(round(fposmod(remaining_hours, 24.0)))
+		var trip_line := "To destination: %.1f nm | ETA: %dd %dh" % [remaining_nm, eta_days, eta_hours]
+		ci.draw_string(ThemeDB.fallback_font, map_rect.position + Vector2(16, 96), trip_line, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
+	elif hover_has_eta and hover_eta_hours >= 0.0:
 		var eta_days := int(floor(hover_eta_hours / 24.0))
 		var eta_hours := int(round(fposmod(hover_eta_hours, 24.0)))
-		var eta_line := "ETA to cursor: %dd %dh" % [eta_days, eta_hours]
-		draw_string(ThemeDB.fallback_font, map_rect.position + Vector2(16, 96), eta_line, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
-	_draw_port_faction_legend(map_rect)
+		var eta_line := "Rough ETA to cursor: %dd %dh" % [eta_days, eta_hours]
+		ci.draw_string(ThemeDB.fallback_font, map_rect.position + Vector2(16, 96), eta_line, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
 
-	# Hard mask outside map rectangle so land never spills outside.
+
+func _wind_guide_screen_center(ship_screen: Vector2, map_rect: Rect2) -> Vector2:
+	var margin := WIND_GUIDE_RADIUS + 10.0
+	var c := ship_screen + Vector2(12.0, 36.0)
+	c.x = clampf(c.x, map_rect.position.x + margin, map_rect.position.x + map_rect.size.x - margin)
+	c.y = clampf(c.y, map_rect.position.y + margin, map_rect.position.y + map_rect.size.y - margin)
+	return c
+
+
+func _draw_wind_at_ship_guide(ci: CanvasItem, map_rect: Rect2, ship_screen: Vector2) -> void:
+	var wind_v: Variant = _sample_wind(current_position, game_month)
+	var wind_from_deg: float = 90.0
+	var wind_speed_m_s: float = 6.0
+	if wind_v is Dictionary:
+		var wd: Dictionary = wind_v
+		wind_from_deg = float(wd.get("direction_deg", 90.0))
+		wind_speed_m_s = float(wd.get("speed_m_s", 6.0))
+	var center := _wind_guide_screen_center(ship_screen, map_rect)
+	var radius := WIND_GUIDE_RADIUS
+	ci.draw_circle(center, radius, Color(0.04, 0.08, 0.12, 0.82))
+	ci.draw_arc(center, radius, 0.0, TAU, 40, Color(0.75, 0.88, 1.0, 0.45), 1.5, true)
+	ci.draw_line(center + Vector2(0.0, -radius), center + Vector2(0.0, radius), Color(0.55, 0.68, 0.85, 0.35), 1.0)
+	ci.draw_line(center + Vector2(-radius, 0.0), center + Vector2(radius, 0.0), Color(0.55, 0.68, 0.85, 0.35), 1.0)
+	ci.draw_string(ThemeDB.fallback_font, center + Vector2(-5.0, -radius - 5.0), "N", HORIZONTAL_ALIGNMENT_LEFT, -1, 11)
+	ci.draw_string(ThemeDB.fallback_font, center + Vector2(-4.0, radius + 10.0), "S", HORIZONTAL_ALIGNMENT_LEFT, -1, 11)
+	ci.draw_string(ThemeDB.fallback_font, center + Vector2(radius + 4.0, 2.0), "E", HORIZONTAL_ALIGNMENT_LEFT, -1, 11)
+	ci.draw_string(ThemeDB.fallback_font, center + Vector2(-radius - 12.0, 2.0), "W", HORIZONTAL_ALIGNMENT_LEFT, -1, 11)
+	var wind_to_deg: float = fposmod(wind_from_deg + 180.0, 360.0)
+	var dir: Vector2 = Vector2.RIGHT.rotated(deg_to_rad(90.0 - wind_to_deg)).normalized()
+	var tip: Vector2 = center + dir * (radius - 5.0)
+	var tail: Vector2 = center - dir * (radius - 10.0)
+	ci.draw_line(tail, tip, Color(0.42, 0.92, 0.76, 0.95), 2.0)
+	var right: Vector2 = Vector2(-dir.y, dir.x)
+	var arrow_left: Vector2 = tip - dir * 7.0 + right * 3.5
+	var arrow_right: Vector2 = tip - dir * 7.0 - right * 3.5
+	ci.draw_colored_polygon(PackedVector2Array([tip, arrow_left, arrow_right]), Color(0.42, 0.92, 0.76, 0.95))
+	var wind_kn: float = wind_speed_m_s * 1.94384
+	var line1 := "Met. wind from %.0f°" % fposmod(wind_from_deg, 360.0)
+	var line2 := "%.1f m/s (~%.0f kn)" % [wind_speed_m_s, wind_kn]
+	var cap_x := clampf(center.x - 78.0, map_rect.position.x + 8.0, map_rect.position.x + map_rect.size.x - 168.0)
+	var cap_y := center.y + radius + 12.0
+	ci.draw_string(ThemeDB.fallback_font, Vector2(cap_x, cap_y), line1, HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
+	ci.draw_string(ThemeDB.fallback_font, Vector2(cap_x, cap_y + 14.0), line2, HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
+
+
+func draw_over_canvas(ci: CanvasItem) -> void:
+	var map_rect := _map_rect()
+	_draw_port_faction_legend(ci, map_rect)
 	var viewport: Vector2 = get_viewport_rect().size
 	var top_h: float = map_rect.position.y
 	var left_w: float = map_rect.position.x
 	var right_x: float = map_rect.position.x + map_rect.size.x
 	var bottom_y: float = map_rect.position.y + map_rect.size.y
-	draw_rect(Rect2(Vector2.ZERO, Vector2(viewport.x, maxf(0.0, top_h))), MAP_OUTSIDE_COLOR, true)
-	draw_rect(Rect2(Vector2.ZERO, Vector2(maxf(0.0, left_w), viewport.y)), MAP_OUTSIDE_COLOR, true)
-	draw_rect(Rect2(Vector2(right_x, 0.0), Vector2(maxf(0.0, viewport.x - right_x), viewport.y)), MAP_OUTSIDE_COLOR, true)
-	draw_rect(Rect2(Vector2(0.0, bottom_y), Vector2(viewport.x, maxf(0.0, viewport.y - bottom_y))), MAP_OUTSIDE_COLOR, true)
+	ci.draw_rect(Rect2(Vector2.ZERO, Vector2(viewport.x, maxf(0.0, top_h))), MAP_OUTSIDE_COLOR, true)
+	ci.draw_rect(Rect2(Vector2.ZERO, Vector2(maxf(0.0, left_w), viewport.y)), MAP_OUTSIDE_COLOR, true)
+	ci.draw_rect(Rect2(Vector2(right_x, 0.0), Vector2(maxf(0.0, viewport.x - right_x), viewport.y)), MAP_OUTSIDE_COLOR, true)
+	ci.draw_rect(Rect2(Vector2(0.0, bottom_y), Vector2(viewport.x, maxf(0.0, viewport.y - bottom_y))), MAP_OUTSIDE_COLOR, true)
 
 func set_target_port(port_name: String) -> bool:
 	if not ports.has(port_name):
@@ -299,25 +397,63 @@ func set_target_port(port_name: String) -> bool:
 	var route := _find_route_world(current_position, target_position)
 	if route.is_empty():
 		return false
-	route_points = route
+	_set_route(route)
 	route_index = 0
 	is_traveling = true
 	travel_accumulator = 0.0
+	_refresh_dynamic_canvas()
 	return true
+
+func set_sail_to_world(world: Vector2) -> bool:
+	world = Vector2(
+		clampf(world.x, 0.0, world_size.x),
+		clampf(world.y, 0.0, world_size.y)
+	)
+	target_port_name = ""
+	target_position = world
+	var route := _find_route_world(current_position, world)
+	if route.is_empty():
+		return false
+	_set_route(route)
+	route_index = 0
+	is_traveling = true
+	travel_accumulator = 0.0
+	_refresh_dynamic_canvas()
+	return true
+
+func is_click_on_map(local_pos: Vector2) -> bool:
+	return _map_rect().has_point(local_pos)
+
+func get_world_from_map_click(local_pos: Vector2) -> Vector2:
+	var w := _screen_to_world(local_pos)
+	return Vector2(
+		clampf(w.x, 0.0, world_size.x),
+		clampf(w.y, 0.0, world_size.y)
+	)
 
 func pick_port_from_click(local_pos: Vector2) -> String:
 	var map_rect := _map_rect()
 	if not map_rect.has_point(local_pos):
 		return ""
 	var world_pos := _screen_to_world(local_pos)
+	const SNAP_SCREEN_PX := 36.0
+	const SNAP_WORLD := 52.0
+	var best_name := ""
+	var best_metric := INF
 	for port_name in ports.keys():
 		var port_pos: Vector2 = _port_position(port_name)
 		var screen_pos := _world_to_screen(port_pos)
 		if not map_rect.has_point(screen_pos):
 			continue
-		if world_pos.distance_to(port_pos) <= (18.0 / zoom_level):
-			return port_name
-	return ""
+		var d_screen := local_pos.distance_to(screen_pos)
+		var d_world := world_pos.distance_to(port_pos)
+		if d_screen > SNAP_SCREEN_PX and d_world > SNAP_WORLD:
+			continue
+		var metric := minf(d_screen, d_world)
+		if metric < best_metric:
+			best_metric = metric
+			best_name = port_name
+	return best_name
 
 func handle_input(event: InputEvent) -> bool:
 	if event is InputEventMouseButton and event.pressed:
@@ -339,7 +475,7 @@ func handle_input(event: InputEvent) -> bool:
 		last_pan_screen_pos = motion_event.position
 		view_offset -= delta / zoom_level
 		_clamp_view_offset()
-		queue_redraw()
+		_refresh_view_canvases()
 		return true
 
 	if event is InputEventMouseMotion:
@@ -369,7 +505,7 @@ func _zoom_at(screen_pos: Vector2, factor: float) -> void:
 	var after: Vector2 = _screen_to_world(screen_pos)
 	view_offset += before - after
 	_clamp_view_offset()
-	queue_redraw()
+	_refresh_view_canvases()
 
 func _clamp_view_offset() -> void:
 	var rect: Rect2 = _map_rect()
@@ -385,14 +521,14 @@ func get_port_names() -> Array[String]:
 	names.sort()
 	return names
 
-func set_time_scale(scale: float) -> void:
-	player_time_scale = clampf(scale, 0.25, 8.0)
+func set_time_scale(time_scale_value: float) -> void:
+	player_time_scale = clampf(time_scale_value, 0.25, 8.0)
 
 func set_ui_layout(sidebar_width: float, log_height: float) -> void:
 	left_gutter_width = maxf(0.0, sidebar_width)
 	log_band_height = maxf(0.0, log_height)
 	_clamp_view_offset()
-	queue_redraw()
+	_refresh_view_canvases()
 
 func get_current_heading_vector() -> Vector2:
 	return _travel_heading_or_default()
@@ -423,6 +559,7 @@ func is_near_land(radius_world: float = 80.0) -> bool:
 func resume_travel_to_target() -> void:
 	if current_position.distance_to(target_position) > 0.01 and not route_points.is_empty():
 		is_traveling = true
+		_refresh_dynamic_canvas()
 
 func get_save_state() -> Dictionary:
 	return {
@@ -469,11 +606,11 @@ func apply_save_state(state: Dictionary) -> void:
 		for point in state["route_points"]:
 			if point is Vector2:
 				restored_route.append(point)
-		route_points = restored_route
+		_set_route(restored_route)
 	if state.has("route_index"):
 		route_index = max(0, int(state["route_index"]))
 	_clamp_view_offset()
-	queue_redraw()
+	_refresh_view_canvases()
 
 func _load_land_data() -> void:
 	if not FileAccess.file_exists(LAND_DATA_PATH):
@@ -518,6 +655,61 @@ func _load_land_data() -> void:
 	if not loaded.is_empty():
 		americas_polygons = loaded
 
+func _load_land_baked() -> void:
+	land_baked_texture = null
+	use_vector_land = true
+	_land_collision_image = null
+	if not ResourceLoader.exists(LAND_BAKED_PATH):
+		return
+	var resource: Resource = load(LAND_BAKED_PATH)
+	if resource is Texture2D:
+		land_baked_texture = resource as Texture2D
+		use_vector_land = false
+		var img: Image = land_baked_texture.get_image()
+		if img != null and img.get_width() > 0 and img.get_height() > 0:
+			_land_collision_image = img
+
+func _draw_baked_land_layer(ci: CanvasItem, map_rect: Rect2) -> void:
+	if land_baked_texture == null:
+		return
+	var tw: float = float(land_baked_texture.get_width())
+	var th: float = float(land_baked_texture.get_height())
+	if tw <= 0.0 or th <= 0.0:
+		return
+	var s: Vector2 = Vector2(tw / world_size.x, th / world_size.y)
+	var vis: Vector2 = map_rect.size / zoom_level
+	var v0: Vector2 = view_offset
+	var src := Rect2(v0.x * s.x, v0.y * s.y, vis.x * s.x, vis.y * s.y)
+	var tex_bounds := Rect2(0.0, 0.0, tw, th)
+	var src_c: Rect2 = src.intersection(tex_bounds)
+	if src_c.size.x <= 0.0 or src_c.size.y <= 0.0:
+		return
+	var rel_pos: Vector2 = (src_c.position - src.position) / src.size
+	var rel_size: Vector2 = src_c.size / src.size
+	var dest := Rect2(
+		map_rect.position + rel_pos * map_rect.size,
+		rel_size * map_rect.size
+	)
+	if dest.size.x <= 0.0 or dest.size.y <= 0.0:
+		return
+	ci.draw_texture_rect_region(land_baked_texture, dest, src_c, Color(1, 1, 1, 1), false, false)
+
+func _draw_vector_land(ci: CanvasItem, map_poly: PackedVector2Array) -> void:
+	for polygon in americas_polygons:
+		var transformed := PackedVector2Array()
+		transformed.resize(polygon.size())
+		for i in range(polygon.size()):
+			transformed[i] = _world_to_screen(polygon[i])
+		var clipped_parts: Array = Geometry2D.intersect_polygons(transformed, map_poly)
+		for part_variant in clipped_parts:
+			if not (part_variant is PackedVector2Array):
+				continue
+			var part: PackedVector2Array = part_variant
+			if part.size() >= 3:
+				ci.draw_colored_polygon(part, LAND_COLOR)
+			if part.size() >= 2:
+				ci.draw_polyline(part, LAND_SHADE, 2.0, true)
+
 func _build_navigation_grid() -> void:
 	nav_cols = int(ceil(world_size.x / nav_cell_size))
 	nav_rows = int(ceil(world_size.y / nav_cell_size))
@@ -530,20 +722,23 @@ func _build_navigation_grid() -> void:
 
 func _cell_has_land(cell: Vector2i) -> bool:
 	var center := _cell_to_world(cell)
-	var half := nav_cell_size * 0.5
-	var samples := [
-		center,
-		center + Vector2(-half * 0.7, -half * 0.7),
-		center + Vector2(half * 0.7, -half * 0.7),
-		center + Vector2(-half * 0.7, half * 0.7),
-		center + Vector2(half * 0.7, half * 0.7),
-	]
-	for p in samples:
-		if _is_land(p):
-			return true
+	var half := nav_cell_size * 0.45
+	for gx in range(-1, 2):
+		for gy in range(-1, 2):
+			var p := center + Vector2(float(gx) * half, float(gy) * half)
+			if _is_land(p):
+				return true
 	return false
 
 func _is_land(world_pos: Vector2) -> bool:
+	var img := _land_collision_image
+	if img != null and img.get_width() > 0 and img.get_height() > 0:
+		var iw := img.get_width()
+		var ih := img.get_height()
+		if iw > 0 and ih > 0:
+			var ix := clampi(int(floor(world_pos.x / world_size.x * float(iw))), 0, iw - 1)
+			var iy := clampi(int(floor(world_pos.y / world_size.y * float(ih))), 0, ih - 1)
+			return img.get_pixel(ix, iy).get_luminance() > 0.2
 	for polygon in americas_polygons:
 		if Geometry2D.is_point_in_polygon(world_pos, polygon):
 			return true
@@ -577,11 +772,24 @@ func _nearest_walkable_cell(from_cell: Vector2i, max_radius: int = 6) -> Vector2
 					return cell
 	return Vector2i(-1, -1)
 
+func _nearest_walkable_cell_with_target_los(target_world: Vector2, max_radius: int = 12) -> Vector2i:
+	var target_cell: Vector2i = _world_to_cell(target_world)
+	var fallback := _nearest_walkable_cell(target_cell, max_radius)
+	for radius in range(0, max_radius + 1):
+		for y in range(target_cell.y - radius, target_cell.y + radius + 1):
+			for x in range(target_cell.x - radius, target_cell.x + radius + 1):
+				var cell := Vector2i(x, y)
+				if not _is_cell_walkable(cell):
+					continue
+				if not _segment_hits_land(_cell_to_world(cell), target_world):
+					return cell
+	return fallback
+
 func _find_route_world(start_world: Vector2, end_world: Vector2) -> Array[Vector2]:
 	if nav_cols <= 0 or nav_rows <= 0:
 		return []
 	var start: Vector2i = _nearest_walkable_cell(_world_to_cell(start_world))
-	var goal: Vector2i = _nearest_walkable_cell(_world_to_cell(end_world))
+	var goal: Vector2i = _nearest_walkable_cell_with_target_los(end_world)
 	if start == Vector2i(-1, -1) or goal == Vector2i(-1, -1):
 		return []
 
@@ -603,6 +811,11 @@ func _find_route_world(start_world: Vector2, end_world: Vector2) -> Array[Vector
 			var next: Vector2i = current + dir
 			if not _is_cell_walkable(next):
 				continue
+			if absi(dir.x) == 1 and absi(dir.y) == 1:
+				var adj_a: Vector2i = current + Vector2i(dir.x, 0)
+				var adj_b: Vector2i = current + Vector2i(0, dir.y)
+				if not _is_cell_walkable(adj_a) or not _is_cell_walkable(adj_b):
+					continue
 
 			var a: Vector2 = _cell_to_world(current)
 			var b: Vector2 = _cell_to_world(next)
@@ -645,12 +858,23 @@ func _edge_hours(a: Vector2, b: Vector2) -> float:
 
 func _segment_hits_land(a: Vector2, b: Vector2) -> bool:
 	var dist := a.distance_to(b)
-	var steps := maxi(2, int(ceil(dist / 12.0)))
+	var spacing: float = maxf(5.0, nav_cell_size / 8.0)
+	var steps := maxi(4, int(ceil(dist / spacing)))
+	var tangent := b - a
+	var normal := Vector2.ZERO
+	if tangent.length_squared() > 0.0001:
+		normal = Vector2(-tangent.y, tangent.x).normalized()
+	var lateral: float = nav_cell_size * 0.42
 	for i in range(steps + 1):
 		var t := float(i) / float(steps)
 		var p := a.lerp(b, t)
-		if _is_land(p):
-			return true
+		var offsets: Array[float] = [0.0]
+		if lateral > 0.01 and normal.length_squared() > 0.0001:
+			offsets = [-lateral, 0.0, lateral]
+		for off in offsets:
+			var sample := p if off == 0.0 else p + normal * off
+			if _is_land(sample):
+				return true
 	return false
 
 func _reconstruct_route(came_from: Dictionary, current: Vector2i, start_world: Vector2, end_world: Vector2) -> Array[Vector2]:
@@ -661,39 +885,106 @@ func _reconstruct_route(came_from: Dictionary, current: Vector2i, start_world: V
 		cells.append(node)
 	cells.reverse()
 
-	var points: Array[Vector2] = [start_world]
+	var points: Array[Vector2] = []
+	var start_cell_world := _cell_to_world(cells[0])
+	var first := start_world
+	if _segment_hits_land(start_world, start_cell_world):
+		first = start_cell_world
+	points.append(first)
 	for cell in cells:
-		points.append(_cell_to_world(cell))
-	points.append(end_world)
+		var cw := _cell_to_world(cell)
+		if points[points.size() - 1].distance_to(cw) > 0.5:
+			points.append(cw)
+	var goal_cell_world := _cell_to_world(cells[cells.size() - 1])
+	var last := end_world
+	if _segment_hits_land(goal_cell_world, end_world):
+		last = goal_cell_world
+	if points[points.size() - 1].distance_to(last) > 0.5:
+		points.append(last)
 	return points
 
+func _heuristic_hover_travel_hours(from_world: Vector2, to_world: Vector2) -> float:
+	var dist_nm := _nautical_miles_between_world(from_world, to_world)
+	var knots := maxf(2.2, _base_ship_knots() * ship_speed_multiplier * 0.88)
+	return (dist_nm / knots) * 1.28
+
 func _update_hover_eta(screen_pos: Vector2) -> void:
-	var map_rect := _map_rect()
-	if not map_rect.has_point(screen_pos):
+	if is_traveling:
 		if hover_has_eta or hover_eta_hours >= 0.0:
 			hover_has_eta = false
 			hover_eta_hours = -1.0
-			queue_redraw()
+		last_hover_cell = Vector2i(-9999, -9999)
+		next_hover_eta_msec = 0
+		return
+
+	var map_rect := _map_rect()
+	if not map_rect.has_point(screen_pos):
+		last_hover_cell = Vector2i(-9999, -9999)
+		next_hover_eta_msec = 0
+		if hover_has_eta or hover_eta_hours >= 0.0:
+			hover_has_eta = false
+			hover_eta_hours = -1.0
+			_refresh_dynamic_canvas()
 		return
 
 	var world := _screen_to_world(screen_pos)
 	hover_world_pos = world
-	var route := _find_route_world(current_position, world)
-	if route.is_empty():
+	if _is_land(world):
 		if hover_has_eta or hover_eta_hours >= 0.0:
 			hover_has_eta = false
 			hover_eta_hours = -1.0
-			queue_redraw()
+			_refresh_dynamic_canvas()
 		return
-
-	var hours := 0.0
-	for i in range(route.size() - 1):
-		hours += _edge_hours(route[i], route[i + 1])
-	var changed := (not hover_has_eta) or absf(hover_eta_hours - hours) > 0.05
+	var hover_cell := _world_to_cell(world)
+	var now_msec: int = Time.get_ticks_msec()
+	if hover_cell == last_hover_cell and now_msec < next_hover_eta_msec:
+		return
+	last_hover_cell = hover_cell
+	next_hover_eta_msec = now_msec + (120 if is_traveling else 120)
+	# Full A* on hover was the main map bottleneck; distance heuristic is enough for cursor preview.
+	var hours := _heuristic_hover_travel_hours(current_position, world)
+	var changed := (not hover_has_eta) or absf(hover_eta_hours - hours) > 1.25
 	hover_has_eta = true
 	hover_eta_hours = hours
 	if changed:
-		queue_redraw()
+		_refresh_dynamic_canvas()
+
+func _set_route(route: Array[Vector2]) -> void:
+	route_points = route
+	_rebuild_route_segment_colors()
+
+func _rebuild_route_segment_colors() -> void:
+	route_segment_colors.clear()
+	if route_points.size() < 2:
+		return
+	for i in range(route_points.size() - 1):
+		route_segment_colors.append(_route_segment_color(route_points[i], route_points[i + 1]))
+
+func _remaining_route_nautical_miles() -> float:
+	if not is_traveling:
+		return 0.0
+	var total_nm := 0.0
+	var prev := current_position
+	for i in range(route_index + 1, route_points.size()):
+		var next_world := route_points[i]
+		total_nm += _nautical_miles_between_world(prev, next_world)
+		prev = next_world
+	if prev.distance_to(target_position) > 0.5:
+		total_nm += _nautical_miles_between_world(prev, target_position)
+	return total_nm
+
+func _remaining_route_hours() -> float:
+	if not is_traveling:
+		return 0.0
+	var total_hours := 0.0
+	var prev := current_position
+	for i in range(route_index + 1, route_points.size()):
+		var next_world := route_points[i]
+		total_hours += _edge_hours(prev, next_world)
+		prev = next_world
+	if prev.distance_to(target_position) > 0.5:
+		total_hours += _edge_hours(prev, target_position)
+	return total_hours
 
 func _load_wind_data() -> void:
 	if not FileAccess.file_exists(WIND_DATA_PATH):
@@ -789,6 +1080,8 @@ func _advance_game_time(hours: float) -> void:
 		if game_month > 12:
 			game_month = 1
 			game_year += 1
+		var month_index := game_year * 12 + game_month
+		emit_signal("game_month_advanced", month_index)
 
 func _days_in_month(month: int) -> int:
 	match month:
@@ -820,9 +1113,15 @@ func _angle_delta_deg(a: float, b: float) -> float:
 
 func _travel_heading_or_default() -> Vector2:
 	if is_traveling:
-		var d := target_position - current_position
-		if d.length() > 0.001:
-			return d.normalized()
+		# Must match the segment we're actually sailing (next waypoint), not bearing to the
+		# final port — otherwise zig-zag routes swing "heading" each frame and wind speed jitters.
+		if route_points.size() >= 2 and route_index < route_points.size() - 1:
+			var ahead: Vector2 = route_points[route_index + 1] - current_position
+			if ahead.length_squared() > 0.000001:
+				return ahead.normalized()
+		var to_dest := target_position - current_position
+		if to_dest.length_squared() > 0.000001:
+			return to_dest.normalized()
 	return Vector2.RIGHT
 
 func _route_segment_color(a: Vector2, b: Vector2) -> Color:
@@ -914,6 +1213,10 @@ func _map_units_per_nautical_mile_near(world_pos: Vector2) -> float:
 		return 1.0
 	return 80.0 / nm
 
+func set_port_owner_overrides(owners: Dictionary) -> void:
+	port_owner_overrides = owners.duplicate(true)
+	_refresh_view_canvases()
+
 func _port_position(port_name: String) -> Vector2:
 	var data_variant: Variant = ports[port_name]
 	if data_variant is Dictionary:
@@ -923,6 +1226,8 @@ func _port_position(port_name: String) -> Vector2:
 	return Vector2.ZERO
 
 func _port_faction(port_name: String) -> String:
+	if port_owner_overrides.has(port_name):
+		return str(port_owner_overrides[port_name])
 	var data_variant: Variant = ports[port_name]
 	if data_variant is Dictionary:
 		var data: Dictionary = data_variant
@@ -930,7 +1235,7 @@ func _port_faction(port_name: String) -> String:
 			return str(data["faction"])
 	return "Unknown"
 
-func _draw_port_faction_legend(map_rect: Rect2) -> void:
+func _draw_port_faction_legend(ci: CanvasItem, map_rect: Rect2) -> void:
 	var legend_size: Vector2 = Vector2(206.0, 104.0)
 	var margin: Vector2 = Vector2(8.0, 6.0)
 	# Keep this on the map's left side to avoid right-edge clipping on narrow windows.
@@ -946,13 +1251,13 @@ func _draw_port_faction_legend(map_rect: Rect2) -> void:
 		clampf(desired_panel_pos.y, min_pos.y, maxf(min_pos.y, max_pos.y))
 	)
 	var panel_rect: Rect2 = Rect2(panel_pos, legend_size)
-	draw_rect(panel_rect, Color(0, 0, 0, 0.35), true)
+	ci.draw_rect(panel_rect, Color(0, 0, 0, 0.35), true)
 	var base: Vector2 = panel_rect.position + Vector2(8.0, 8.0)
-	draw_string(ThemeDB.fallback_font, base + Vector2(0, 14), "Port Factions", HORIZONTAL_ALIGNMENT_LEFT, -1, 16)
+	ci.draw_string(ThemeDB.fallback_font, base + Vector2(0, 14), "Port Factions", HORIZONTAL_ALIGNMENT_LEFT, -1, 16)
 	var factions: Array[String] = ["Spanish", "English", "French", "Dutch"]
 	for i in range(factions.size()):
 		var faction: String = factions[i]
 		var y: float = base.y + 34.0 + float(i) * 16.0
 		var color: Color = FACTION_COLORS[faction]
-		draw_circle(Vector2(base.x + 7.0, y - 4.0), 4.0, color)
-		draw_string(ThemeDB.fallback_font, Vector2(base.x + 18.0, y), faction, HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
+		ci.draw_circle(Vector2(base.x + 7.0, y - 4.0), 4.0, color)
+		ci.draw_string(ThemeDB.fallback_font, Vector2(base.x + 18.0, y), faction, HORIZONTAL_ALIGNMENT_LEFT, -1, 14)

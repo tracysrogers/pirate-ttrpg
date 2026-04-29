@@ -11,9 +11,11 @@ var blocked_cells: Dictionary = {}
 var gangplank_cells: Dictionary = {}
 var objective_cells: Dictionary = {}
 var chokepoint_cells: Dictionary = {}
+var deck_cells: Dictionary = {}
 
 const GRID_COLOR := Color(0.28, 0.3, 0.36)
-const BG_COLOR := Color(0.12, 0.13, 0.16)
+const WATER_COLOR := Color(0.04, 0.08, 0.12)
+const DECK_COLOR := Color(0.2, 0.16, 0.1)
 const MOVE_HIGHLIGHT := Color(0.3, 0.65, 1.0, 0.25)
 const HOVER_COLOR := Color(1.0, 1.0, 1.0, 0.15)
 const BLOCKED_COLOR := Color(0.2, 0.17, 0.12, 0.9)
@@ -23,7 +25,20 @@ const CHOKEPOINT_COLOR := Color(0.4, 0.28, 0.16, 0.5)
 
 func _draw() -> void:
 	var board_size := Vector2(width * tile_size, height * tile_size)
-	draw_rect(Rect2(Vector2.ZERO, board_size), BG_COLOR, true)
+	draw_rect(Rect2(Vector2.ZERO, board_size), WATER_COLOR, true)
+
+	var cells_to_draw: Array[Vector2i] = []
+	if deck_cells.is_empty():
+		for y in range(height):
+			for x in range(width):
+				cells_to_draw.append(Vector2i(x, y))
+	else:
+		for cell in deck_cells.keys():
+			cells_to_draw.append(cell)
+
+	for cell in cells_to_draw:
+		var deck_rect := Rect2(Vector2(cell) * tile_size, Vector2.ONE * tile_size)
+		draw_rect(deck_rect, DECK_COLOR, true)
 
 	for cell in chokepoint_cells.keys():
 		var choke_rect := Rect2(Vector2(cell) * tile_size, Vector2.ONE * tile_size)
@@ -45,19 +60,13 @@ func _draw() -> void:
 		var rect := Rect2(Vector2(cell) * tile_size, Vector2.ONE * tile_size)
 		draw_rect(rect, MOVE_HIGHLIGHT, true)
 
-	if is_in_bounds(hovered_cell):
+	if is_in_bounds(hovered_cell) and is_cell_on_deck(hovered_cell):
 		var hover_rect := Rect2(Vector2(hovered_cell) * tile_size, Vector2.ONE * tile_size)
 		draw_rect(hover_rect, HOVER_COLOR, true)
 
-	for x in range(width + 1):
-		var from := Vector2(x * tile_size, 0)
-		var to := Vector2(x * tile_size, height * tile_size)
-		draw_line(from, to, GRID_COLOR, 1.0)
-
-	for y in range(height + 1):
-		var from := Vector2(0, y * tile_size)
-		var to := Vector2(width * tile_size, y * tile_size)
-		draw_line(from, to, GRID_COLOR, 1.0)
+	for cell in cells_to_draw:
+		var rect := Rect2(Vector2(cell) * tile_size, Vector2.ONE * tile_size)
+		draw_rect(rect, GRID_COLOR, false, 1.0)
 
 func local_to_cell(local_pos: Vector2) -> Vector2i:
 	return Vector2i(
@@ -90,6 +99,12 @@ func set_blocked_cells(cells: Array[Vector2i]) -> void:
 		blocked_cells[cell] = true
 	queue_redraw()
 
+func set_deck_cells(cells: Array[Vector2i]) -> void:
+	deck_cells.clear()
+	for cell in cells:
+		deck_cells[cell] = true
+	queue_redraw()
+
 func set_gangplank_cells(cells: Array[Vector2i]) -> void:
 	gangplank_cells.clear()
 	for cell in cells:
@@ -110,3 +125,6 @@ func set_chokepoint_cells(cells: Array[Vector2i]) -> void:
 
 func is_cell_blocked(cell: Vector2i) -> bool:
 	return blocked_cells.has(cell)
+
+func is_cell_on_deck(cell: Vector2i) -> bool:
+	return deck_cells.is_empty() or deck_cells.has(cell)

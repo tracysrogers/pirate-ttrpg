@@ -33,6 +33,7 @@ var captain_log_text_label: Label
 var left_sidebar_layer: CanvasLayer
 var left_sidebar_panel: ColorRect
 var left_sidebar_menu_box: VBoxContainer
+var sidebar_wind_compass: Control
 var main_map_info_layer: CanvasLayer
 var main_map_info_overlay: ColorRect
 var main_map_info_panel: PanelContainer
@@ -108,6 +109,7 @@ var ship_combat_zoom: float = 1.0
 var ship_combat_pan: Vector2 = Vector2.ZERO
 var ship_combat_is_panning: bool = false
 var ship_combat_last_pan_pos: Vector2 = Vector2.ZERO
+var ship_combat_show_gun_range: bool = false
 var main_menu_layer: CanvasLayer
 var main_menu_panel: PanelContainer
 var main_menu_settings_panel: PanelContainer
@@ -133,6 +135,8 @@ const UI_BASE_LOG_HEIGHT := 220.0
 const UI_MIN_LOG_HEIGHT := 140.0
 const UI_MAX_LOG_HEIGHT := 240.0
 const UI_MIN_MAP_HEIGHT := 180.0
+const SIDEBAR_WIND_COMPASS_MIN_HEIGHT := 92.0
+const SIDEBAR_WIND_COMPASS_BOTTOM_GAP := 8.0
 const SAVE_FILE_PATH := "user://savegame.json"
 const SHIP_CLASS_SPEED_KNOTS := {
 	"Sloop": 5.2,
@@ -148,14 +152,19 @@ const CROWS_NEST_HEIGHT_FEET := {
 }
 const PLAYER_NAVIGATOR_SKILL := 3
 const SHIP_ACTION_MOVE := 0
-const SHIP_ACTION_FIRE := 1
-const SHIP_ACTION_BOARD := 2
-const SHIP_ACTION_END_TURN := 3
+const SHIP_ACTION_VOLLEY := 1
+const SHIP_ACTION_SHOW_GUNS := 2
+const SHIP_ACTION_BOARD := 3
+const SHIP_ACTION_DISENGAGE := 4
+const SHIP_ACTION_END_TURN := 5
+const SHIP_NAV_VIEW_COLS := 44
+const SHIP_NAV_VIEW_ROWS := 26
 const SHIP_COMBAT_MIN_ZOOM := 0.7
 const SHIP_COMBAT_MAX_ZOOM := 2.2
 const BOARDING_ACTION_MOVE := 0
 const BOARDING_ACTION_RANGED := 1
 const BOARDING_ACTION_MELEE := 2
+const BOARDING_ACTION_END_TURN := 3
 const CREW_CARD_LABELS := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 const CareerSystemScript := preload("res://scripts/career_system.gd")
 const SUPPLY_UNIT_COST := 6
@@ -212,6 +221,22 @@ const CARGO_UNIT_COST := {
 	"Pimento": 16
 }
 
+
+class SidebarWindCompassControl extends Control:
+	var host: Node2D
+
+	func _ready() -> void:
+		set_process(true)
+
+	func _process(_delta: float) -> void:
+		queue_redraw()
+
+	func _draw() -> void:
+		if host == null or not host.has_method("_paint_sidebar_wind_compass"):
+			return
+		host._paint_sidebar_wind_compass(self)
+
+
 func _ready() -> void:
 	randomize()
 	_reset_career_state()
@@ -266,41 +291,52 @@ func _draw() -> void:
 		var combat_rect: Rect2 = layout["combat_rect"]
 		var options_rect: Rect2 = layout["options_rect"]
 		var grid_arena_rect: Rect2 = layout["grid_arena_rect"]
-		var base_grid_rect: Rect2 = _naval_grid_rect(grid_arena_rect, ship_battle.combat_cols, ship_battle.combat_rows)
+		var nav_vc: int = SHIP_NAV_VIEW_COLS
+		var nav_vr: int = SHIP_NAV_VIEW_ROWS
+		var base_grid_rect: Rect2 = _naval_grid_rect(grid_arena_rect, nav_vc, nav_vr)
 		var grid_rect: Rect2 = _ship_combat_view_rect(base_grid_rect)
+		var nav_view_origin: Vector2 = _ship_nav_view_origin(nav_vc, nav_vr)
 		var view_rect := Rect2(Vector2.ZERO, viewport_size)
 		draw_rect(view_rect, Color(0.08, 0.14, 0.2), true)
 		draw_rect(Rect2(Vector2(0.0, viewport_size.y * 0.62), Vector2(viewport_size.x, viewport_size.y * 0.38)), Color(0.06, 0.11, 0.18), true)
 		draw_rect(hud_rect, Color(0.02, 0.06, 0.1, 0.45), true)
 		draw_rect(combat_rect, Color(0.08, 0.16, 0.25, 0.45), false, 2.0)
-		_draw_naval_grid(grid_rect, ship_battle.combat_cols, ship_battle.combat_rows)
-		_draw_ship_hazards(grid_rect)
+		_draw_naval_grid(grid_rect, nav_vc, nav_vr)
+		_draw_ship_hazards(grid_rect, nav_view_origin, nav_vc, nav_vr)
+		if ship_combat_show_gun_range:
+			_draw_ship_gun_range_overlay(grid_rect, nav_view_origin, nav_vc, nav_vr)
 		if ship_combat_selected_action == SHIP_ACTION_MOVE:
-			_draw_ship_movement_preview(grid_rect)
-		else:
-			_draw_ship_fire_preview(grid_rect)
+			_draw_ship_movement_preview(grid_rect, nav_view_origin, nav_vc, nav_vr)
 		_draw_ship_action_panel(options_rect)
 
-		var player_center := _combat_to_screen(ship_battle.player_position, grid_rect, ship_battle.combat_cols, ship_battle.combat_rows)
-		var enemy_center := _combat_to_screen(ship_battle.enemy_position, grid_rect, ship_battle.combat_cols, ship_battle.combat_rows)
+		var player_center := _combat_to_screen(
+			ship_battle.player_position, grid_rect, ship_battle.combat_cols, ship_battle.combat_rows, nav_view_origin, nav_vc, nav_vr
+		)
+		var enemy_center := _combat_to_screen(
+			ship_battle.enemy_position, grid_rect, ship_battle.combat_cols, ship_battle.combat_rows, nav_view_origin, nav_vc, nav_vr
+		)
 		_draw_ship_silhouette(player_center, ship_battle.player_ship_class, ship_battle.player_heading_deg, Color(0.58, 0.44, 0.29))
 		_draw_ship_silhouette(enemy_center, ship_battle.enemy_ship_class, ship_battle.enemy_heading_deg, Color(0.46, 0.33, 0.22))
 		draw_string(ThemeDB.fallback_font, player_center + Vector2(-64, 92), "Your %s" % ship_battle.player_ship_class, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
 		draw_string(ThemeDB.fallback_font, enemy_center + Vector2(-74, 92), "Enemy %s" % ship_battle.enemy_ship_class, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
+		if ship_battle.phase == ShipBattle.Phase.PLANNING and ship_battle.player_plan_end_pos.distance_to(ship_battle.player_cell_pos) > 0.12:
+			var plan_pt: Vector2 = _naval_cell_center_from_float(
+				ship_battle.player_plan_end_pos, grid_rect, nav_view_origin, nav_vc, nav_vr
+			)
+			draw_circle(plan_pt, 7.0, Color(0.35, 0.92, 0.78, 0.4))
+			draw_arc(plan_pt, 7.0, 0.0, TAU, 24, Color(0.85, 1.0, 0.95, 0.8), 2.0)
 
-		var compass_center := Vector2(hud_rect.position.x + hud_rect.size.x - 66.0, hud_rect.position.y + 78.0)
-		_draw_wind_compass(compass_center, ship_battle.wind_direction_deg, ship_battle.wind_speed_m_s)
 		var left_x: float = hud_rect.position.x + 18.0
 		var middle_x: float = hud_rect.position.x + hud_rect.size.x * 0.43
-		var right_limit_x: float = compass_center.x - 120.0
+		var right_limit_x: float = hud_rect.position.x + hud_rect.size.x - 20.0
 
-		var status := "Ship Combat - Mouse/Arrows: Select square | Enter: Confirm | F: Fire | Space: Board | E: End Turn | Wheel: Zoom"
+		var status := "Ship Combat - WEGO: Move | Volley if in range (toggle) | Gun range (preview) | Board | Commit=E. F toggles gun-range overlay. X=Break off. Wheel=Zoom."
 		draw_string(ThemeDB.fallback_font, Vector2(left_x, hud_rect.position.y + 26.0), status, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - left_x, 20)
 		var action_name: String = "Move"
-		if ship_combat_selected_action == SHIP_ACTION_FIRE:
-			action_name = "Fire Cannons"
-		elif ship_combat_selected_action == SHIP_ACTION_BOARD:
+		if ship_combat_selected_action == SHIP_ACTION_BOARD:
 			action_name = "Board"
+		elif ship_combat_selected_action == SHIP_ACTION_DISENGAGE:
+			action_name = "Break off"
 		draw_string(ThemeDB.fallback_font, Vector2(left_x, hud_rect.position.y + 44.0), "Selected Action: %s" % action_name, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - left_x, 16)
 
 		var player_line := "Player Hull: %d  Crew: %d" % [ship_battle.player_hull, ship_battle.player_crew]
@@ -308,11 +344,9 @@ func _draw() -> void:
 		draw_string(ThemeDB.fallback_font, Vector2(left_x, hud_rect.position.y + 64.0), player_line, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - left_x, 20)
 		draw_string(ThemeDB.fallback_font, Vector2(left_x, hud_rect.position.y + 90.0), enemy_line, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - left_x, 20)
 
-		var phase_text := "Turn: Player"
-		if ship_battle.phase == ShipBattle.Phase.ENEMY_TURN:
-			phase_text = "Turn: Enemy"
-		elif ship_battle.phase == ShipBattle.Phase.RESOLVED:
-			phase_text = "Turn: Resolved"
+		var phase_text := "Phase: Planning orders"
+		if ship_battle.phase == ShipBattle.Phase.RESOLVED:
+			phase_text = "Phase: Resolved"
 		draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 58.0), phase_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 20)
 		var turn_cost_text := "Turn Cost - You: %d | Enemy: %d" % [
 			ship_battle.get_player_turn_cost(),
@@ -321,11 +355,18 @@ func _draw() -> void:
 		draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 84.0), turn_cost_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 18)
 		var mp_text := "Movement Points - You: %d | Enemy: %d" % [ship_battle.player_move_points, ship_battle.enemy_move_points]
 		draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 108.0), mp_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 18)
+		var gun_reload_text := "Gun reload — You: %s | Enemy: %s" % [
+			"ready" if ship_battle.player_cannon_reload_turns_remaining <= 0 else "%d rd" % ship_battle.player_cannon_reload_turns_remaining,
+			"ready" if ship_battle.enemy_cannon_reload_turns_remaining <= 0 else "%d rd" % ship_battle.enemy_cannon_reload_turns_remaining
+		]
+		draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 130.0), gun_reload_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 16)
 		var forward_text := "Forward Move: %.1f squares/advance" % float(ship_battle.get_player_movement_preview().get("forward_step_cells", 1.0))
-		draw_string(ThemeDB.fallback_font, Vector2(left_x, hud_rect.position.y + 130.0), forward_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - left_x, 18)
-		if ship_move_selected_cell.x >= 0:
-			var sel_text := "Selected: (%d,%d)  Press Enter to move" % [ship_move_selected_cell.x, ship_move_selected_cell.y]
-			draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 130.0), sel_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 18)
+		draw_string(ThemeDB.fallback_font, Vector2(left_x, hud_rect.position.y + 152.0), forward_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - left_x, 18)
+		if ship_move_selected_cell.x >= 0 and ship_combat_selected_action == SHIP_ACTION_MOVE:
+			var sel_text := "Move plan: (%d,%d)  Enter to set" % [ship_move_selected_cell.x, ship_move_selected_cell.y]
+			draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 152.0), sel_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 18)
+		if ship_battle.player_plan_volley_when_in_range:
+			draw_string(ThemeDB.fallback_font, Vector2(left_x, hud_rect.position.y + 174.0), "Volley if in range: ON", HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - left_x, 16)
 	elif game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT and game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
 		_draw_boarding_deck_surface()
 		_draw_boarding_units_overlay()
@@ -407,22 +448,26 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT:
 		if event.is_action_pressed("ui_left"):
-			ship_combat_selected_action = SHIP_ACTION_MOVE
+			if ship_combat_selected_action != SHIP_ACTION_MOVE:
+				return
 			ship_end_turn_confirm_open = false
 			_move_ship_selection(Vector2i.LEFT)
 			return
 		if event.is_action_pressed("ui_right"):
-			ship_combat_selected_action = SHIP_ACTION_MOVE
+			if ship_combat_selected_action != SHIP_ACTION_MOVE:
+				return
 			ship_end_turn_confirm_open = false
 			_move_ship_selection(Vector2i.RIGHT)
 			return
 		if event.is_action_pressed("ui_up"):
-			ship_combat_selected_action = SHIP_ACTION_MOVE
+			if ship_combat_selected_action != SHIP_ACTION_MOVE:
+				return
 			ship_end_turn_confirm_open = false
 			_move_ship_selection(Vector2i.UP)
 			return
 		if event.is_action_pressed("ui_down"):
-			ship_combat_selected_action = SHIP_ACTION_MOVE
+			if ship_combat_selected_action != SHIP_ACTION_MOVE:
+				return
 			ship_end_turn_confirm_open = false
 			_move_ship_selection(Vector2i.DOWN)
 			return
@@ -432,15 +477,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			GameFlow.Mode.SHIP_COMBAT:
 				if ship_combat_selected_action == SHIP_ACTION_MOVE:
 					_confirm_ship_move_selection()
-				elif ship_combat_selected_action == SHIP_ACTION_FIRE:
-					ship_battle.player_fire_cannons()
-					_resolve_enemy_ship_turn_if_needed()
 				elif ship_combat_selected_action == SHIP_ACTION_BOARD:
 					if ship_battle.can_player_board_now():
 						ship_battle.player_attempt_boarding()
-						_resolve_enemy_ship_turn_if_needed()
 					else:
-						game_flow.post_message("Boarding unavailable: move adjacent to the enemy.")
+						game_flow.post_message("Boarding plan unavailable.")
 			GameFlow.Mode.TACTICAL_COMBAT:
 				if game_flow.tactical_type != GameFlow.TacticalType.BOARDING:
 					_end_turn()
@@ -448,15 +489,18 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		var key_event: InputEventKey = event
 		if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and key_event.keycode == KEY_F:
-			ship_battle.player_fire_cannons()
-			_resolve_enemy_ship_turn_if_needed()
+			ship_combat_show_gun_range = not ship_combat_show_gun_range
+			ship_end_turn_confirm_open = false
 		elif game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and key_event.keycode == KEY_E:
-			ship_battle.player_end_turn()
-			_resolve_enemy_ship_turn_if_needed()
+			ship_battle.player_commit_orders()
+		elif game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT and game_flow.tactical_type == GameFlow.TacticalType.BOARDING and key_event.keycode == KEY_E:
+			_end_boarding_actor_turn()
+		elif game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and key_event.keycode == KEY_X:
+			if ship_battle.can_player_disengage():
+				ship_battle.player_disengage()
 
 	if event.is_action_pressed("ui_select") and game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT:
 		ship_battle.player_attempt_boarding()
-		_resolve_enemy_ship_turn_if_needed()
 
 	if event.is_action_pressed("ui_select") and game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT:
 		game_flow.post_message("Manual resolve removed. Win by combat/objectives.")
@@ -536,6 +580,8 @@ func _handle_tactical_click(world_pos: Vector2) -> void:
 				boarding_selected_action = BOARDING_ACTION_RANGED
 			elif _boarding_action_button_rect(panel_rect, BOARDING_ACTION_MELEE).has_point(world_pos):
 				boarding_selected_action = BOARDING_ACTION_MELEE
+			elif _boarding_end_turn_button_rect(panel_rect).has_point(world_pos):
+				_end_boarding_actor_turn()
 			return
 
 	var active_actor: Unit = _current_boarding_actor() if game_flow.tactical_type == GameFlow.TacticalType.BOARDING else null
@@ -734,10 +780,12 @@ func _on_mode_changed(new_mode: int) -> void:
 	if new_mode == GameFlow.Mode.SHIP_COMBAT:
 		ship_combat_selected_action = SHIP_ACTION_MOVE
 		ship_end_turn_confirm_open = false
+		ship_combat_show_gun_range = false
 		ship_combat_zoom = 1.0
 		ship_combat_pan = Vector2.ZERO
 		ship_combat_is_panning = false
 		_sync_ship_move_selection()
+		call_deferred("_layout_worldmap_ui")
 	_sync_camera_to_viewport()
 	_layout_tactical_ui()
 	if world_map.visible:
@@ -791,9 +839,14 @@ func _on_boarding_started(attacker_is_player: bool) -> void:
 	else:
 		game_flow.post_message("Defend your %s deck for 3 rounds or eliminate boarders." % current_boarding_template_name)
 
-func _on_ship_battle_finished(player_won: bool) -> void:
+func _on_ship_battle_finished(player_won: bool, disengaged: bool = false) -> void:
 	var enemy_faction_snapshot := last_ship_battle_enemy_faction
 	var was_aggressor_snapshot := last_ship_battle_player_aggressor
+	if disengaged:
+		last_ship_battle_enemy_faction = ""
+		last_ship_battle_player_aggressor = false
+		_set_mode(GameFlow.Mode.WORLD_MAP)
+		return
 	_apply_ship_battle_faction_reputation(player_won)
 	_try_progress_governor_mission_naval_win(player_won, enemy_faction_snapshot, was_aggressor_snapshot)
 	if player_won:
@@ -807,10 +860,7 @@ func _on_ship_battle_finished(player_won: bool) -> void:
 	_set_mode(GameFlow.Mode.WORLD_MAP)
 
 func _resolve_enemy_ship_turn_if_needed() -> void:
-	if game_flow.current_mode != GameFlow.Mode.SHIP_COMBAT:
-		return
-	if ship_battle.phase == ShipBattle.Phase.ENEMY_TURN:
-		ship_battle.enemy_take_turn()
+	pass
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey:
@@ -1012,6 +1062,18 @@ func _advance_boarding_turn() -> void:
 		boarding_round += 1
 		_rebuild_boarding_round_order()
 	_begin_boarding_actor_turn()
+
+func _end_boarding_actor_turn() -> void:
+	if game_flow.tactical_type != GameFlow.TacticalType.BOARDING:
+		return
+	var actor: Unit = _current_boarding_actor()
+	if actor == null or actor.team != Unit.Team.PLAYER:
+		return
+	boarding_actor_moved = true
+	boarding_actor_attacked = true
+	_clear_selection()
+	game_flow.post_message("%s ends turn." % _unit_label(actor))
+	_advance_boarding_turn()
 
 func _prune_boarding_initiative() -> void:
 	var actor_before: Unit = _current_boarding_actor()
@@ -1403,16 +1465,39 @@ func _draw_ship_silhouette(center: Vector2, ship_class: String, heading_deg: flo
 		var px: float = lerpf(-90.0 * draw_scale, 88.0 * draw_scale, t)
 		draw_circle(basis * Vector2(px, 20.0 * draw_scale), 2.5, Color(0.1, 0.1, 0.1))
 
-func _combat_to_screen(point: Vector2, combat_rect: Rect2, cols: int, rows: int) -> Vector2:
+func _ship_nav_view_origin(view_cols: int, view_rows: int) -> Vector2:
+	var mid: Vector2 = (ship_battle.player_cell_pos + ship_battle.enemy_cell_pos) * 0.5
+	var max_ox: float = maxf(0.0, float(ship_battle.combat_cols - view_cols))
+	var max_oy: float = maxf(0.0, float(ship_battle.combat_rows - view_rows))
+	var ox: float = clampf(mid.x - float(view_cols) * 0.5, 0.0, max_ox)
+	var oy: float = clampf(mid.y - float(view_rows) * 0.5, 0.0, max_oy)
+	return Vector2(ox, oy)
+
+func _naval_cell_center_from_float(cell_pos: Vector2, grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> Vector2:
+	var cell_w: float = grid_rect.size.x / float(max(1, view_cols))
+	var cell_h: float = grid_rect.size.y / float(max(1, view_rows))
+	var rx: float = cell_pos.x - view_origin.x
+	var ry: float = cell_pos.y - view_origin.y
+	return Vector2(grid_rect.position.x + (rx + 0.5) * cell_w, grid_rect.position.y + (ry + 0.5) * cell_h)
+
+func _naval_cell_rect(grid_rect: Rect2, cell: Vector2i, view_origin: Vector2, view_cols: int, view_rows: int) -> Rect2:
+	var cell_w: float = grid_rect.size.x / float(max(1, view_cols))
+	var cell_h: float = grid_rect.size.y / float(max(1, view_rows))
+	var rx: float = float(cell.x) - view_origin.x
+	var ry: float = float(cell.y) - view_origin.y
+	return Rect2(
+		Vector2(grid_rect.position.x + rx * cell_w, grid_rect.position.y + ry * cell_h),
+		Vector2(cell_w, cell_h)
+	)
+
+func _combat_to_screen(
+	point: Vector2, combat_rect: Rect2, cols: int, rows: int, view_origin: Vector2, view_cols: int, view_rows: int
+) -> Vector2:
 	if cols <= 0 or rows <= 0:
 		return combat_rect.position + Vector2(point.x * combat_rect.size.x, point.y * combat_rect.size.y)
-	# `point` is normalized from a 0..(cols-1) grid (see ShipBattle player_position/enemy_position).
-	# Map it to the center of the corresponding tile in a cols x rows grid.
 	var gx: float = clampf(point.x, 0.0, 1.0) * float(max(1, cols - 1))
 	var gy: float = clampf(point.y, 0.0, 1.0) * float(max(1, rows - 1))
-	var centered_x: float = (gx + 0.5) / float(cols)
-	var centered_y: float = (gy + 0.5) / float(rows)
-	return combat_rect.position + Vector2(centered_x * combat_rect.size.x, centered_y * combat_rect.size.y)
+	return _naval_cell_center_from_float(Vector2(gx, gy), combat_rect, view_origin, view_cols, view_rows)
 
 func _naval_grid_rect(arena_rect: Rect2, cols: int, rows: int) -> Rect2:
 	if cols <= 0 or rows <= 0:
@@ -1472,10 +1557,12 @@ func _draw_naval_grid(combat_rect: Rect2, cols: int, rows: int) -> void:
 			draw_rect(cell_rect, border_color, false, 1.0)
 	draw_rect(combat_rect, Color(0.9, 0.97, 1.0, 0.35), false, 2.0)
 
-func _draw_ship_hazards(grid_rect: Rect2) -> void:
+func _draw_ship_hazards(grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> void:
 	var hazards: Array[Vector2i] = ship_battle.get_hazard_cells()
 	for cell in hazards:
-		var rect: Rect2 = _cell_rect(grid_rect, cell, ship_battle.combat_cols, ship_battle.combat_rows)
+		var rect: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
+		if not rect.intersects(grid_rect.grow(2.0)):
+			continue
 		draw_rect(rect, Color(0.74, 0.28, 0.22, 0.3), true)
 		draw_rect(rect, Color(0.92, 0.45, 0.35, 0.75), false, 1.0)
 
@@ -1485,15 +1572,32 @@ func _draw_ship_action_panel(panel_rect: Rect2) -> void:
 	draw_string(ThemeDB.fallback_font, panel_rect.position + Vector2(14.0, 24.0), "Turn Options", HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
 
 	var move_rect := _ship_action_button_rect(panel_rect, SHIP_ACTION_MOVE)
-	var fire_rect := _ship_action_button_rect(panel_rect, SHIP_ACTION_FIRE)
+	var volley_rect := _ship_action_button_rect(panel_rect, SHIP_ACTION_VOLLEY)
+	var show_guns_rect := _ship_action_button_rect(panel_rect, SHIP_ACTION_SHOW_GUNS)
 	var board_rect := _ship_action_button_rect(panel_rect, SHIP_ACTION_BOARD)
+	var disengage_rect := _ship_action_button_rect(panel_rect, SHIP_ACTION_DISENGAGE)
 	var end_turn_rect := _ship_action_button_rect(panel_rect, SHIP_ACTION_END_TURN)
 	_draw_ship_action_button(move_rect, "Move", ship_combat_selected_action == SHIP_ACTION_MOVE, true)
-	_draw_ship_action_button(fire_rect, "Fire Cannons", ship_combat_selected_action == SHIP_ACTION_FIRE, true)
-	_draw_ship_action_button(board_rect, "Board", ship_combat_selected_action == SHIP_ACTION_BOARD, ship_battle.can_player_board_now())
-	_draw_ship_action_button(end_turn_rect, "End Turn", false, true)
-	if ship_end_turn_confirm_open:
-		_draw_end_turn_confirm(panel_rect)
+	_draw_ship_action_button(
+		volley_rect,
+		"Volley if in range",
+		ship_battle.player_plan_volley_when_in_range,
+		true
+	)
+	_draw_ship_action_button(show_guns_rect, "Gun range", ship_combat_show_gun_range, true)
+	_draw_ship_action_button(
+		board_rect,
+		"Board",
+		ship_combat_selected_action == SHIP_ACTION_BOARD or ship_battle.player_plan_board,
+		ship_battle.can_player_board_now()
+	)
+	_draw_ship_action_button(
+		disengage_rect,
+		"Break off",
+		ship_combat_selected_action == SHIP_ACTION_DISENGAGE,
+		ship_battle.can_player_disengage()
+	)
+	_draw_ship_action_button(end_turn_rect, "Commit Round", false, true)
 
 func _draw_ship_action_button(button_rect: Rect2, text: String, selected: bool, enabled: bool = true) -> void:
 	var bg: Color = Color(0.2, 0.36, 0.52, 0.8) if selected else Color(0.1, 0.2, 0.3, 0.8)
@@ -1509,12 +1613,16 @@ func _draw_ship_action_button(button_rect: Rect2, text: String, selected: bool, 
 
 func _ship_action_button_rect(panel_rect: Rect2, action_id: int) -> Rect2:
 	var idx: int = 0
-	if action_id == SHIP_ACTION_FIRE:
+	if action_id == SHIP_ACTION_VOLLEY:
 		idx = 1
-	elif action_id == SHIP_ACTION_BOARD:
+	elif action_id == SHIP_ACTION_SHOW_GUNS:
 		idx = 2
-	elif action_id == SHIP_ACTION_END_TURN:
+	elif action_id == SHIP_ACTION_BOARD:
 		idx = 3
+	elif action_id == SHIP_ACTION_DISENGAGE:
+		idx = 4
+	elif action_id == SHIP_ACTION_END_TURN:
+		idx = 5
 	return Rect2(
 		panel_rect.position + Vector2(12.0, 40.0 + float(idx) * 48.0),
 		Vector2(panel_rect.size.x - 24.0, 36.0)
@@ -1546,9 +1654,11 @@ func _draw_boarding_action_panel(panel_rect: Rect2) -> void:
 	var move_rect := _boarding_action_button_rect(panel_rect, BOARDING_ACTION_MOVE)
 	var ranged_rect := _boarding_action_button_rect(panel_rect, BOARDING_ACTION_RANGED)
 	var melee_rect := _boarding_action_button_rect(panel_rect, BOARDING_ACTION_MELEE)
+	var end_turn_rect := _boarding_end_turn_button_rect(panel_rect)
 	_draw_ship_action_button(move_rect, "Move", boarding_selected_action == BOARDING_ACTION_MOVE, true)
 	_draw_ship_action_button(ranged_rect, "Ranged Attack", boarding_selected_action == BOARDING_ACTION_RANGED, true)
 	_draw_ship_action_button(melee_rect, "Melee Attack", boarding_selected_action == BOARDING_ACTION_MELEE, true)
+	_draw_ship_action_button(end_turn_rect, "End Turn", false, true)
 	var actor: Unit = _current_boarding_actor()
 	var actor_text: String = "Current: -"
 	if actor != null:
@@ -1559,7 +1669,7 @@ func _draw_boarding_action_panel(panel_rect: Rect2) -> void:
 func _boarding_action_panel_rect() -> Rect2:
 	var viewport_size: Vector2 = get_viewport_rect().size
 	var metrics: Dictionary = _ui_metrics(viewport_size)
-	var panel_size := Vector2(220.0, 248.0)
+	var panel_size := Vector2(220.0, 296.0)
 	var top_y: float = 16.0
 	var max_y: float = maxf(top_y, float(metrics["map_height"]) - panel_size.y - 16.0)
 	return Rect2(Vector2(viewport_size.x - panel_size.x - 16.0, max_y), panel_size)
@@ -1567,6 +1677,12 @@ func _boarding_action_panel_rect() -> Rect2:
 func _boarding_action_button_rect(panel_rect: Rect2, action_id: int) -> Rect2:
 	return Rect2(
 		panel_rect.position + Vector2(12.0, 40.0 + float(action_id) * 48.0),
+		Vector2(panel_rect.size.x - 24.0, 36.0)
+	)
+
+func _boarding_end_turn_button_rect(panel_rect: Rect2) -> Rect2:
+	return Rect2(
+		panel_rect.position + Vector2(12.0, panel_rect.size.y - 108.0),
 		Vector2(panel_rect.size.x - 24.0, 36.0)
 	)
 
@@ -1634,10 +1750,10 @@ func _draw_boarding_units_overlay() -> void:
 		if unit.has_acted:
 			draw_circle(center, radius, Color(0.0, 0.0, 0.0, 0.4))
 
-func _draw_ship_movement_preview(grid_rect: Rect2) -> void:
+func _draw_ship_movement_preview(grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> void:
 	if game_flow.current_mode != GameFlow.Mode.SHIP_COMBAT:
 		return
-	if ship_battle.phase != ShipBattle.Phase.PLAYER_TURN:
+	if ship_battle.phase != ShipBattle.Phase.PLANNING:
 		return
 	var preview: Dictionary = ship_battle.get_player_movement_preview()
 	if not preview.has("reachable_cells"):
@@ -1646,8 +1762,6 @@ func _draw_ship_movement_preview(grid_rect: Rect2) -> void:
 	var forward: Variant = preview.get("forward_cells", [])
 	if not (reachable is Array):
 		return
-	var cols: int = ship_battle.combat_cols
-	var rows: int = ship_battle.combat_rows
 	var envelope_points := PackedVector2Array()
 
 	for cell_variant in reachable:
@@ -1656,16 +1770,16 @@ func _draw_ship_movement_preview(grid_rect: Rect2) -> void:
 		var cell: Vector2i = cell_variant
 		if cell == ship_battle.player_cell:
 			continue
-		var r: Rect2 = _cell_rect(grid_rect, cell, cols, rows)
+		var r: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
 		draw_rect(r, Color(0.34, 0.7, 0.95, 0.12), true)
-		envelope_points.append(_cell_center(grid_rect, cell, cols, rows))
+		envelope_points.append(_naval_cell_center_from_float(Vector2(cell), grid_rect, view_origin, view_cols, view_rows))
 
 	if forward is Array:
 		for cell_variant in forward:
 			if not (cell_variant is Vector2i):
 				continue
 			var cell: Vector2i = cell_variant
-			var r: Rect2 = _cell_rect(grid_rect, cell, cols, rows)
+			var r: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
 			draw_rect(r, Color(0.45, 0.95, 0.72, 0.22), true)
 
 	# True movement envelope from the actual reachable cells this turn.
@@ -1676,11 +1790,11 @@ func _draw_ship_movement_preview(grid_rect: Rect2) -> void:
 			draw_polyline(hull, Color(0.52, 0.98, 0.82, 0.45), 2.0, true)
 
 	# Forward-facing cone for immediate heading intent.
-	var ship_center: Vector2 = _cell_center(grid_rect, ship_battle.player_cell, cols, rows)
+	var ship_center: Vector2 = _naval_cell_center_from_float(ship_battle.player_cell_pos, grid_rect, view_origin, view_cols, view_rows)
 	var heading: Vector2 = Vector2.RIGHT.rotated(deg_to_rad(90.0 - ship_battle.player_heading_deg)).normalized()
 	var right: Vector2 = Vector2(-heading.y, heading.x)
 	var cells_forward: int = max(1, ship_battle.player_move_points)
-	var cone_length: float = float(cells_forward) * (grid_rect.size.y / float(rows))
+	var cone_length: float = float(cells_forward) * (grid_rect.size.y / float(view_rows))
 	var cone_width: float = cone_length * 0.75
 	var tip: Vector2 = ship_center + heading * cone_length
 	var left_tip: Vector2 = ship_center + heading * cone_length * 0.75 + right * cone_width * 0.5
@@ -1688,33 +1802,35 @@ func _draw_ship_movement_preview(grid_rect: Rect2) -> void:
 	draw_colored_polygon(PackedVector2Array([ship_center, left_tip, tip, right_tip]), Color(0.45, 0.98, 0.8, 0.08))
 	draw_line(ship_center, tip, Color(0.58, 1.0, 0.86, 0.5), 2.0)
 
-	_draw_action_destinations(grid_rect)
-	_draw_selected_ship_move_cell(grid_rect)
+	_draw_action_destinations(grid_rect, view_origin, view_cols, view_rows)
+	_draw_selected_ship_move_cell(grid_rect, view_origin, view_cols, view_rows)
 
-func _draw_ship_fire_preview(grid_rect: Rect2) -> void:
+func _draw_ship_gun_range_overlay(grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> void:
 	if game_flow.current_mode != GameFlow.Mode.SHIP_COMBAT:
 		return
-	if ship_battle.phase != ShipBattle.Phase.PLAYER_TURN:
+	if ship_battle.phase != ShipBattle.Phase.PLANNING:
 		return
-	var cells: Array[Vector2i] = ship_battle.get_player_fire_preview_cells()
+	var cells: Array[Vector2i] = ship_battle.get_player_gun_range_preview_cells()
 	for cell in cells:
-		var rect: Rect2 = _cell_rect(grid_rect, cell, ship_battle.combat_cols, ship_battle.combat_rows)
-		draw_rect(rect, Color(0.95, 0.45, 0.35, 0.15), true)
-	var enemy_rect: Rect2 = _cell_rect(grid_rect, ship_battle.enemy_cell, ship_battle.combat_cols, ship_battle.combat_rows)
+		var rect: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
+		draw_rect(rect, Color(0.95, 0.55, 0.35, 0.12), true)
+	var enemy_rect: Rect2 = _naval_cell_rect(grid_rect, ship_battle.enemy_cell, view_origin, view_cols, view_rows)
 	if cells.has(ship_battle.enemy_cell):
-		draw_rect(enemy_rect, Color(1.0, 0.3, 0.25, 0.28), true)
-		draw_rect(enemy_rect, Color(1.0, 0.8, 0.75, 0.9), false, 2.0)
-		draw_string(ThemeDB.fallback_font, enemy_rect.position + Vector2(6.0, 16.0), "FIRE", HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
+		draw_rect(enemy_rect, Color(1.0, 0.45, 0.28, 0.22), true)
+		draw_rect(enemy_rect, Color(1.0, 0.82, 0.65, 0.75), false, 2.0)
+		draw_string(ThemeDB.fallback_font, enemy_rect.position + Vector2(4.0, 14.0), "IN ARC", HORIZONTAL_ALIGNMENT_LEFT, -1, 11)
 
-func _draw_action_destinations(grid_rect: Rect2) -> void:
-	if ship_battle.phase != ShipBattle.Phase.PLAYER_TURN:
+func _draw_action_destinations(grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> void:
+	if ship_battle.phase != ShipBattle.Phase.PLANNING:
 		return
 	var guidance: Dictionary = ship_battle.get_player_action_guidance()
-	_draw_action_marker(grid_rect, guidance.get("left", {}), "L", Color(0.95, 0.72, 0.4, 0.95))
-	_draw_action_marker(grid_rect, guidance.get("forward", {}), "F", Color(0.46, 0.96, 0.72, 0.95))
-	_draw_action_marker(grid_rect, guidance.get("right", {}), "R", Color(0.45, 0.78, 0.98, 0.95))
+	_draw_action_marker(grid_rect, view_origin, view_cols, view_rows, guidance.get("left", {}), "L", Color(0.95, 0.72, 0.4, 0.95))
+	_draw_action_marker(grid_rect, view_origin, view_cols, view_rows, guidance.get("forward", {}), "F", Color(0.46, 0.96, 0.72, 0.95))
+	_draw_action_marker(grid_rect, view_origin, view_cols, view_rows, guidance.get("right", {}), "R", Color(0.45, 0.78, 0.98, 0.95))
 
-func _draw_action_marker(grid_rect: Rect2, action_data: Dictionary, short_label: String, color: Color) -> void:
+func _draw_action_marker(
+	grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int, action_data: Dictionary, short_label: String, color: Color
+) -> void:
 	if action_data.is_empty():
 		return
 	if not action_data.get("can_execute", false):
@@ -1732,7 +1848,10 @@ func _draw_action_marker(grid_rect: Rect2, action_data: Dictionary, short_label:
 		),
 		grid_rect,
 		ship_battle.combat_cols,
-		ship_battle.combat_rows
+		ship_battle.combat_rows,
+		view_origin,
+		view_cols,
+		view_rows
 	)
 	draw_circle(center, 9.0, color)
 	draw_circle(center, 11.0, Color(color.r, color.g, color.b, 0.35))
@@ -1748,37 +1867,79 @@ func _draw_action_marker(grid_rect: Rect2, action_data: Dictionary, short_label:
 		13
 	)
 
-func _draw_selected_ship_move_cell(grid_rect: Rect2) -> void:
+func _draw_selected_ship_move_cell(grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> void:
 	if ship_move_selected_cell.x < 0 or ship_move_selected_cell.y < 0:
 		return
 	if not ship_battle.can_player_move_to_cell(ship_move_selected_cell):
 		return
-	var rect: Rect2 = _cell_rect(grid_rect, ship_move_selected_cell, ship_battle.combat_cols, ship_battle.combat_rows)
+	var rect: Rect2 = _naval_cell_rect(grid_rect, ship_move_selected_cell, view_origin, view_cols, view_rows)
 	draw_rect(rect, Color(1.0, 0.96, 0.55, 0.22), true)
 	draw_rect(rect, Color(1.0, 0.96, 0.55, 0.9), false, 2.0)
 	draw_string(ThemeDB.fallback_font, rect.position + Vector2(6.0, 16.0), "SELECTED", HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
 
-func _draw_wind_compass(center: Vector2, wind_from_deg: float, wind_speed_m_s: float) -> void:
-	var radius: float = 28.0
-	draw_circle(center, radius, Color(0.05, 0.1, 0.14, 0.75))
-	draw_arc(center, radius, 0.0, TAU, 48, Color(0.8, 0.9, 1.0, 0.5), 2.0)
-	draw_line(center + Vector2(0.0, -radius), center + Vector2(0.0, radius), Color(0.6, 0.75, 0.9, 0.35), 1.0)
-	draw_line(center + Vector2(-radius, 0.0), center + Vector2(radius, 0.0), Color(0.6, 0.75, 0.9, 0.35), 1.0)
-	draw_string(ThemeDB.fallback_font, center + Vector2(-5.0, -radius - 6.0), "N", HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
-	draw_string(ThemeDB.fallback_font, center + Vector2(-4.0, radius + 14.0), "S", HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
-	draw_string(ThemeDB.fallback_font, center + Vector2(radius + 6.0, 4.0), "E", HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
-	draw_string(ThemeDB.fallback_font, center + Vector2(-radius - 14.0, 4.0), "W", HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
+func _get_sidebar_compass_wind() -> Dictionary:
+	match game_flow.current_mode:
+		GameFlow.Mode.SHIP_COMBAT:
+			return {"direction_deg": ship_battle.wind_direction_deg, "speed_m_s": ship_battle.wind_speed_m_s}
+		GameFlow.Mode.WORLD_MAP:
+			return world_map.get_current_wind()
+		_:
+			return {"direction_deg": 90.0, "speed_m_s": 6.0}
+
+
+func _paint_sidebar_wind_compass(target: CanvasItem) -> void:
+	var c: Control = target as Control
+	if c == null:
+		return
+	var wind: Dictionary = _get_sidebar_compass_wind()
+	var w: float = maxf(1.0, c.size.x)
+	var h: float = maxf(1.0, c.size.y)
+	var radius: float = clampf(minf(w * 0.22, h * 0.36), 18.0, 28.0)
+	var center := Vector2(w * 0.5, radius + 18.0)
+	_draw_wind_compass_on(
+		c,
+		center,
+		float(wind.get("direction_deg", 90.0)),
+		float(wind.get("speed_m_s", 6.0)),
+		radius,
+		11
+	)
+
+
+func _draw_wind_compass_on(
+	ci: CanvasItem,
+	center: Vector2,
+	wind_from_deg: float,
+	wind_speed_m_s: float,
+	radius: float = 28.0,
+	wind_label_font_px: int = 13
+) -> void:
+	ci.draw_circle(center, radius, Color(0.05, 0.1, 0.14, 0.75))
+	ci.draw_arc(center, radius, 0.0, TAU, 48, Color(0.8, 0.9, 1.0, 0.5), 2.0)
+	ci.draw_line(center + Vector2(0.0, -radius), center + Vector2(0.0, radius), Color(0.6, 0.75, 0.9, 0.35), 1.0)
+	ci.draw_line(center + Vector2(-radius, 0.0), center + Vector2(radius, 0.0), Color(0.6, 0.75, 0.9, 0.35), 1.0)
+	ci.draw_string(ThemeDB.fallback_font, center + Vector2(-5.0, -radius - 6.0), "N", HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
+	ci.draw_string(ThemeDB.fallback_font, center + Vector2(-4.0, radius + 14.0), "S", HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
+	ci.draw_string(ThemeDB.fallback_font, center + Vector2(radius + 6.0, 4.0), "E", HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
+	ci.draw_string(ThemeDB.fallback_font, center + Vector2(-radius - 14.0, 4.0), "W", HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
 
 	var wind_to_deg: float = fposmod(wind_from_deg + 180.0, 360.0)
 	var dir: Vector2 = Vector2.RIGHT.rotated(deg_to_rad(90.0 - wind_to_deg)).normalized()
 	var tip: Vector2 = center + dir * (radius - 6.0)
 	var tail: Vector2 = center - dir * (radius - 12.0)
-	draw_line(tail, tip, Color(0.44, 0.95, 0.78, 0.95), 2.0)
+	ci.draw_line(tail, tip, Color(0.44, 0.95, 0.78, 0.95), 2.0)
 	var right: Vector2 = Vector2(-dir.y, dir.x)
 	var arrow_left: Vector2 = tip - dir * 8.0 + right * 4.0
 	var arrow_right: Vector2 = tip - dir * 8.0 - right * 4.0
-	draw_colored_polygon(PackedVector2Array([tip, arrow_left, arrow_right]), Color(0.44, 0.95, 0.78, 0.95))
-	draw_string(ThemeDB.fallback_font, center + Vector2(-24.0, radius + 30.0), "Wind %.1f m/s" % wind_speed_m_s, HORIZONTAL_ALIGNMENT_LEFT, -1, 13)
+	ci.draw_colored_polygon(PackedVector2Array([tip, arrow_left, arrow_right]), Color(0.44, 0.95, 0.78, 0.95))
+	ci.draw_string(
+		ThemeDB.fallback_font,
+		center + Vector2(-26.0, radius + 28.0),
+		"Wind %.1f m/s" % wind_speed_m_s,
+		HORIZONTAL_ALIGNMENT_LEFT,
+		-1,
+		wind_label_font_px
+	)
 
 func _sync_ship_move_selection() -> void:
 	var reachable: Array[Vector2i] = ship_battle.get_player_reachable_cells()
@@ -1822,7 +1983,7 @@ func _confirm_ship_move_selection() -> void:
 	if ship_move_selected_cell.x < 0:
 		return
 	if ship_battle.execute_player_move_to_cell(ship_move_selected_cell):
-		game_flow.post_message("Helm set: moving to (%d,%d)." % [ship_move_selected_cell.x, ship_move_selected_cell.y])
+		game_flow.post_message("Movement orders: end turn at (%d,%d)." % [ship_move_selected_cell.x, ship_move_selected_cell.y])
 		_sync_ship_move_selection()
 	else:
 		game_flow.post_message("Selected square is not reachable this turn.")
@@ -1832,14 +1993,20 @@ func _handle_ship_combat_click(screen_pos: Vector2) -> void:
 	var layout: Dictionary = _ship_combat_layout(viewport_size)
 	var options_rect: Rect2 = layout["options_rect"]
 	var grid_arena_rect: Rect2 = layout["grid_arena_rect"]
-	var base_grid_rect: Rect2 = _naval_grid_rect(grid_arena_rect, ship_battle.combat_cols, ship_battle.combat_rows)
+	var nav_vc: int = SHIP_NAV_VIEW_COLS
+	var nav_vr: int = SHIP_NAV_VIEW_ROWS
+	var base_grid_rect: Rect2 = _naval_grid_rect(grid_arena_rect, nav_vc, nav_vr)
 	var grid_rect: Rect2 = _ship_combat_view_rect(base_grid_rect)
+	var nav_view_origin: Vector2 = _ship_nav_view_origin(nav_vc, nav_vr)
 	if options_rect.has_point(screen_pos):
 		if _ship_action_button_rect(options_rect, SHIP_ACTION_MOVE).has_point(screen_pos):
 			ship_combat_selected_action = SHIP_ACTION_MOVE
 			ship_end_turn_confirm_open = false
-		elif _ship_action_button_rect(options_rect, SHIP_ACTION_FIRE).has_point(screen_pos):
-			ship_combat_selected_action = SHIP_ACTION_FIRE
+		elif _ship_action_button_rect(options_rect, SHIP_ACTION_VOLLEY).has_point(screen_pos):
+			ship_battle.player_toggle_volley_when_in_range()
+			ship_end_turn_confirm_open = false
+		elif _ship_action_button_rect(options_rect, SHIP_ACTION_SHOW_GUNS).has_point(screen_pos):
+			ship_combat_show_gun_range = not ship_combat_show_gun_range
 			ship_end_turn_confirm_open = false
 		elif _ship_action_button_rect(options_rect, SHIP_ACTION_BOARD).has_point(screen_pos):
 			if ship_battle.can_player_board_now():
@@ -1847,31 +2014,28 @@ func _handle_ship_combat_click(screen_pos: Vector2) -> void:
 			else:
 				game_flow.post_message("Boarding unavailable: move adjacent to the enemy.")
 			ship_end_turn_confirm_open = false
+		elif _ship_action_button_rect(options_rect, SHIP_ACTION_DISENGAGE).has_point(screen_pos):
+			if ship_battle.can_player_disengage():
+				ship_combat_selected_action = SHIP_ACTION_DISENGAGE
+			else:
+				game_flow.post_message("Too close to break off—open more distance first.")
+			ship_end_turn_confirm_open = false
 		elif _ship_action_button_rect(options_rect, SHIP_ACTION_END_TURN).has_point(screen_pos):
-			ship_end_turn_confirm_open = true
-		if ship_end_turn_confirm_open:
-			var dialog_rect := Rect2(
-				options_rect.position + Vector2(12.0, options_rect.size.y - 118.0),
-				Vector2(options_rect.size.x - 24.0, 106.0)
-			)
-			var yes_rect: Rect2 = _end_turn_confirm_button_rect(dialog_rect, true)
-			var no_rect: Rect2 = _end_turn_confirm_button_rect(dialog_rect, false)
-			if yes_rect.has_point(screen_pos):
-				ship_end_turn_confirm_open = false
-				ship_battle.player_end_turn()
-				_resolve_enemy_ship_turn_if_needed()
-			elif no_rect.has_point(screen_pos):
-				ship_end_turn_confirm_open = false
+			ship_battle.player_commit_orders()
 		return
 	if not grid_rect.has_point(screen_pos):
 		return
-	var cell_w: float = grid_rect.size.x / float(ship_battle.combat_cols)
-	var cell_h: float = grid_rect.size.y / float(ship_battle.combat_rows)
-	var col: int = clampi(int(floor((screen_pos.x - grid_rect.position.x) / cell_w)), 0, ship_battle.combat_cols - 1)
-	var row: int = clampi(int(floor((screen_pos.y - grid_rect.position.y) / cell_h)), 0, ship_battle.combat_rows - 1)
+	var cell_w: float = grid_rect.size.x / float(nav_vc)
+	var cell_h: float = grid_rect.size.y / float(nav_vr)
+	var col_f: float = nav_view_origin.x + (screen_pos.x - grid_rect.position.x) / cell_w
+	var row_f: float = nav_view_origin.y + (screen_pos.y - grid_rect.position.y) / cell_h
+	var col: int = clampi(int(floor(col_f)), 0, ship_battle.combat_cols - 1)
+	var row: int = clampi(int(floor(row_f)), 0, ship_battle.combat_rows - 1)
 	var clicked: Vector2i = Vector2i(col, row)
 	if ship_combat_selected_action == SHIP_ACTION_MOVE and ship_battle.can_player_move_to_cell(clicked):
 		ship_move_selected_cell = clicked
+	elif ship_combat_selected_action == SHIP_ACTION_DISENGAGE and ship_battle.can_player_disengage():
+		ship_battle.player_disengage()
 
 func _cell_rect(grid_rect: Rect2, cell: Vector2i, cols: int, rows: int) -> Rect2:
 	var cell_w: float = grid_rect.size.x / float(cols)
@@ -1970,6 +2134,11 @@ func _setup_left_sidebar_ui() -> void:
 	left_sidebar_menu_box.add_child(_make_sidebar_button("Captain's Log", _on_map_captains_log_pressed))
 	left_sidebar_menu_box.add_child(_make_sidebar_button("Port Information", _on_map_port_info_pressed))
 	left_sidebar_menu_box.add_child(_make_sidebar_button("Retire", _on_map_retire_pressed))
+
+	sidebar_wind_compass = SidebarWindCompassControl.new()
+	sidebar_wind_compass.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sidebar_wind_compass.host = self
+	left_sidebar_panel.add_child(sidebar_wind_compass)
 
 func _make_sidebar_button(text: String, action: Callable) -> Button:
 	var button := Button.new()
@@ -3984,7 +4153,18 @@ func _layout_worldmap_ui() -> void:
 		left_sidebar_panel.position = Vector2(0, 0)
 		left_sidebar_panel.size = Vector2(sidebar_width, map_height)
 
-	if left_sidebar_menu_box != null:
+	if left_sidebar_menu_box != null and sidebar_wind_compass != null:
+		var compass_h: float = SIDEBAR_WIND_COMPASS_MIN_HEIGHT
+		var compass_gap: float = SIDEBAR_WIND_COMPASS_BOTTOM_GAP
+		var menu_bottom_y: float = map_height - compass_h - compass_gap
+		left_sidebar_menu_box.position = Vector2(12.0, 52.0)
+		left_sidebar_menu_box.size = Vector2(
+			maxf(80.0, sidebar_width - 24.0),
+			maxf(80.0, menu_bottom_y - 52.0 - 4.0)
+		)
+		sidebar_wind_compass.position = Vector2(12.0, menu_bottom_y)
+		sidebar_wind_compass.size = Vector2(maxf(80.0, sidebar_width - 24.0), compass_h)
+	elif left_sidebar_menu_box != null:
 		left_sidebar_menu_box.position = Vector2(12.0, 52.0)
 		left_sidebar_menu_box.size = Vector2(maxf(80.0, sidebar_width - 24.0), maxf(80.0, map_height - 64.0))
 

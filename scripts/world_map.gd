@@ -76,6 +76,9 @@ var _layer_dynamic: Node2D
 var _layer_over: Node2D
 ## Runtime port controller; keys are port names, values faction strings. Filled from career save.
 var port_owner_overrides: Dictionary = {}
+## Port under cursor for tooltip dwell (same port ~1s before popup).
+var port_hover_pending: String = ""
+var port_hover_since_msec: int = 0
 
 const MAP_BG := Color(0.08, 0.2, 0.32)
 const LAND_COLOR := Color(0.83, 0.76, 0.58)
@@ -88,6 +91,30 @@ const FACTION_COLORS := {
 	"French": Color(0.3, 0.52, 0.9),
 	"Dutch": Color(0.96, 0.56, 0.2)
 }
+
+## Static almanac for map hover (population / wealth / services). Faction comes from save + overrides.
+const PORT_DOSSIER := {
+	"Havana": {"population": "55 000", "wealth": "Very prosperous", "services": "Shipyard, cathedral, governor, market, navy yard"},
+	"Nassau": {"population": "3 000", "wealth": "Modest", "services": "Tavern, careenage, fence, small market"},
+	"Port Royal": {"population": "8 000", "wealth": "Prosperous", "services": "Tavern, dockyard, warehouse, governor"},
+	"Tortuga": {"population": "2 000", "wealth": "Poor", "services": "Tavern, smugglers' beach, fence"},
+	"Cartagena": {"population": "22 000", "wealth": "Very prosperous", "services": "Mint, cathedral, market, garrison, shipwright"},
+	"Santo Domingo": {"population": "12 000", "wealth": "Prosperous", "services": "Cathedral, market, sugar factors, church"},
+	"Veracruz": {"population": "10 000", "wealth": "Prosperous", "services": "Treasure convoy pier, market, customs house"},
+	"Portobelo": {"population": "4 000", "wealth": "Moderate", "services": "Fair, treasure storehouses, church"},
+	"San Juan": {"population": "9 000", "wealth": "Prosperous", "services": "Citadel, dockyard, market, garrison"},
+	"Campeche": {"population": "5 000", "wealth": "Moderate", "services": "Market, church, coastal trade"},
+	"Maracaibo": {"population": "7 000", "wealth": "Moderate", "services": "Pearl trade, market, tavern"},
+	"Willemstad": {"population": "6 000", "wealth": "Prosperous", "services": "Slave market, warehouses, Dutch WIC"},
+	"Santiago de Cuba": {"population": "8 000", "wealth": "Moderate", "services": "Cathedral, sugar wharves, market"},
+	"Port-au-Prince": {"population": "5 000", "wealth": "Moderate", "services": "Sugar factors, market, tavern"},
+	"Bridgetown": {"population": "10 000", "wealth": "Prosperous", "services": "Sugar exchange, dockyard, market"},
+	"St. Pierre": {"population": "4 000", "wealth": "Moderate", "services": "Coffee factors, church, market"},
+	"Basse-Terre": {"population": "3 500", "wealth": "Modest", "services": "Sugar landing, market, tavern"},
+	"La Guaira": {"population": "6 000", "wealth": "Moderate", "services": "Caracas road, customs, coastal trade"},
+	"St. Augustine": {"population": "2 500", "wealth": "Modest", "services": "Mission, small garrison, coquina wharf"}
+}
+const PORT_HOVER_DWELL_MSEC := 1000
 
 var left_gutter_width: float = 96.0
 var log_band_height: float = 220.0
@@ -183,6 +210,7 @@ func _ready() -> void:
 	_refresh_view_canvases()
 
 func _process(delta: float) -> void:
+	_tick_port_hover_tooltip()
 	var sim_delta := delta * player_time_scale
 	if is_traveling:
 		_advance_game_time(sim_delta * in_game_hours_per_real_second)
@@ -378,7 +406,6 @@ func _draw_wind_at_ship_guide(ci: CanvasItem, map_rect: Rect2, ship_screen: Vect
 
 func draw_over_canvas(ci: CanvasItem) -> void:
 	var map_rect := _map_rect()
-	_draw_port_faction_legend(ci, map_rect)
 	var viewport: Vector2 = get_viewport_rect().size
 	var top_h: float = map_rect.position.y
 	var left_w: float = map_rect.position.x
@@ -388,6 +415,7 @@ func draw_over_canvas(ci: CanvasItem) -> void:
 	ci.draw_rect(Rect2(Vector2.ZERO, Vector2(maxf(0.0, left_w), viewport.y)), MAP_OUTSIDE_COLOR, true)
 	ci.draw_rect(Rect2(Vector2(right_x, 0.0), Vector2(maxf(0.0, viewport.x - right_x), viewport.y)), MAP_OUTSIDE_COLOR, true)
 	ci.draw_rect(Rect2(Vector2(0.0, bottom_y), Vector2(viewport.x, maxf(0.0, viewport.y - bottom_y))), MAP_OUTSIDE_COLOR, true)
+	_draw_port_hover_tooltip(ci, map_rect)
 
 func set_target_port(port_name: String) -> bool:
 	if not ports.has(port_name):
@@ -455,6 +483,103 @@ func pick_port_from_click(local_pos: Vector2) -> String:
 			best_name = port_name
 	return best_name
 
+
+func _update_port_hover(screen_pos: Vector2) -> void:
+	var map_rect := _map_rect()
+	var next: String = ""
+	if map_rect.has_point(screen_pos):
+		next = pick_port_from_click(screen_pos)
+	var changed: bool = false
+	if next != port_hover_pending:
+		port_hover_pending = next
+		port_hover_since_msec = Time.get_ticks_msec()
+		changed = true
+	if changed or next != "":
+		if _layer_over != null:
+			_layer_over.queue_redraw()
+
+
+func _tick_port_hover_tooltip() -> void:
+	if _layer_over == null or port_hover_pending == "":
+		return
+	if Time.get_ticks_msec() - port_hover_since_msec < PORT_HOVER_DWELL_MSEC:
+		return
+	var mouse: Vector2 = get_viewport().get_mouse_position()
+	if pick_port_from_click(mouse) != port_hover_pending:
+		return
+	_layer_over.queue_redraw()
+
+
+func _port_hover_tooltip_lines(port_name: String) -> PackedStringArray:
+	var lines: PackedStringArray = []
+	if not ports.has(port_name):
+		return lines
+	var faction: String = _port_faction(port_name)
+	var dossier: Dictionary = {}
+	var dvar: Variant = PORT_DOSSIER.get(port_name, {})
+	if dvar is Dictionary:
+		dossier = dvar
+	var pop: String = str(dossier.get("population", "—"))
+	var wealth: String = str(dossier.get("wealth", "—"))
+	var services: String = str(dossier.get("services", "—"))
+	lines.append(port_name)
+	lines.append("Last known flag: %s" % faction)
+	lines.append("Population (approx.): %s" % pop)
+	lines.append("Wealth: %s" % wealth)
+	lines.append("Services: %s" % services)
+	return lines
+
+
+func _draw_port_hover_tooltip(ci: CanvasItem, map_rect: Rect2) -> void:
+	if port_hover_pending == "":
+		return
+	if Time.get_ticks_msec() - port_hover_since_msec < PORT_HOVER_DWELL_MSEC:
+		return
+	var mouse: Vector2 = get_viewport().get_mouse_position()
+	if pick_port_from_click(mouse) != port_hover_pending:
+		return
+	var lines: PackedStringArray = _port_hover_tooltip_lines(port_hover_pending)
+	if lines.is_empty():
+		return
+	var font: Font = ThemeDB.fallback_font
+	var font_px: int = 14
+	var pad: float = 10.0
+	var line_wrap: float = clampf(map_rect.size.x * 0.42 - pad * 2.0, 120.0, 320.0)
+	var total_text_h: float = 0.0
+	var max_inner_w: float = 0.0
+	for line in lines:
+		var sz: Vector2 = font.get_multiline_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, line_wrap, font_px)
+		total_text_h += sz.y + 4.0
+		max_inner_w = maxf(max_inner_w, sz.x)
+	var box_w: float = clampf(max_inner_w + pad * 2.0, 160.0, map_rect.size.x * 0.45)
+	line_wrap = box_w - pad * 2.0
+	total_text_h = 0.0
+	for line in lines:
+		var sz2: Vector2 = font.get_multiline_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, line_wrap, font_px)
+		total_text_h += sz2.y + 4.0
+	var box_h: float = total_text_h + pad * 2.0
+	var pos: Vector2 = mouse + Vector2(16.0, 18.0)
+	pos.x = clampf(pos.x, map_rect.position.x + 6.0, map_rect.position.x + map_rect.size.x - box_w - 6.0)
+	pos.y = clampf(pos.y, map_rect.position.y + 6.0, map_rect.position.y + map_rect.size.y - box_h - 6.0)
+	var box := Rect2(pos, Vector2(box_w, box_h))
+	ci.draw_rect(box, Color(0.02, 0.04, 0.08, 0.92), true)
+	ci.draw_rect(box, Color(0.55, 0.7, 0.88, 0.55), false, 1.5)
+	var y: float = pos.y + pad
+	var ascent: float = font.get_ascent(font_px)
+	for line in lines:
+		var sz3: Vector2 = font.get_multiline_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, line_wrap, font_px)
+		ci.draw_string(
+			font,
+			Vector2(pos.x + pad, y + ascent),
+			line,
+			HORIZONTAL_ALIGNMENT_LEFT,
+			line_wrap,
+			font_px,
+			Color(0.92, 0.94, 0.98)
+		)
+		y += sz3.y + 4.0
+
+
 func handle_input(event: InputEvent) -> bool:
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
@@ -481,6 +606,7 @@ func handle_input(event: InputEvent) -> bool:
 	if event is InputEventMouseMotion:
 		var motion_event: InputEventMouseMotion = event
 		_update_hover_eta(motion_event.position)
+		_update_port_hover(motion_event.position)
 		return false
 
 	return false
@@ -1234,30 +1360,3 @@ func _port_faction(port_name: String) -> String:
 		if data.has("faction"):
 			return str(data["faction"])
 	return "Unknown"
-
-func _draw_port_faction_legend(ci: CanvasItem, map_rect: Rect2) -> void:
-	var legend_size: Vector2 = Vector2(206.0, 104.0)
-	var margin: Vector2 = Vector2(8.0, 6.0)
-	# Keep this on the map's left side to avoid right-edge clipping on narrow windows.
-	var desired_panel_pos: Vector2 = map_rect.position + Vector2(12.0, 108.0)
-	var viewport_rect: Rect2 = Rect2(Vector2.ZERO, get_viewport_rect().size)
-	var safe_rect: Rect2 = map_rect.intersection(viewport_rect)
-	if safe_rect.size.x <= 0.0 or safe_rect.size.y <= 0.0:
-		return
-	var min_pos: Vector2 = safe_rect.position + margin
-	var max_pos: Vector2 = safe_rect.position + safe_rect.size - legend_size - margin
-	var panel_pos: Vector2 = Vector2(
-		clampf(desired_panel_pos.x, min_pos.x, maxf(min_pos.x, max_pos.x)),
-		clampf(desired_panel_pos.y, min_pos.y, maxf(min_pos.y, max_pos.y))
-	)
-	var panel_rect: Rect2 = Rect2(panel_pos, legend_size)
-	ci.draw_rect(panel_rect, Color(0, 0, 0, 0.35), true)
-	var base: Vector2 = panel_rect.position + Vector2(8.0, 8.0)
-	ci.draw_string(ThemeDB.fallback_font, base + Vector2(0, 14), "Port Factions", HORIZONTAL_ALIGNMENT_LEFT, -1, 16)
-	var factions: Array[String] = ["Spanish", "English", "French", "Dutch"]
-	for i in range(factions.size()):
-		var faction: String = factions[i]
-		var y: float = base.y + 34.0 + float(i) * 16.0
-		var color: Color = FACTION_COLORS[faction]
-		ci.draw_circle(Vector2(base.x + 7.0, y - 4.0), 4.0, color)
-		ci.draw_string(ThemeDB.fallback_font, Vector2(base.x + 18.0, y), faction, HORIZONTAL_ALIGNMENT_LEFT, -1, 14)

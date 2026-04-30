@@ -3,15 +3,14 @@ class_name ShipBattle
 
 signal battle_updated(text: String)
 signal boarding_started(attacker_is_player: bool)
-signal battle_finished(player_won: bool)
+signal battle_finished(player_won: bool, disengaged: bool)
 
 enum Phase {
-	PLAYER_TURN,
-	ENEMY_TURN,
+	PLANNING,
 	RESOLVED
 }
 
-var phase: Phase = Phase.PLAYER_TURN
+var phase: Phase = Phase.PLANNING
 var player_hull: int = 16
 var enemy_hull: int = 16
 var player_crew: int = 24
@@ -26,27 +25,46 @@ var player_heading_deg: float = 0.0
 var enemy_heading_deg: float = 180.0
 var wind_direction_deg: float = 90.0
 var wind_speed_m_s: float = 6.0
-var combat_cols: int = 40
-var combat_rows: int = 24
-var player_cell: Vector2i = Vector2i(10, 17)
-var enemy_cell: Vector2i = Vector2i(30, 6)
-var player_cell_pos: Vector2 = Vector2(10.0, 17.0)
-var enemy_cell_pos: Vector2 = Vector2(30.0, 6.0)
+var combat_cols: int = 88
+var combat_rows: int = 52
+var player_cell: Vector2i = Vector2i(32, 26)
+var enemy_cell: Vector2i = Vector2i(54, 22)
+var player_cell_pos: Vector2 = Vector2(32.0, 26.0)
+var enemy_cell_pos: Vector2 = Vector2(54.0, 22.0)
 var player_heading_idx: int = 2
 var enemy_heading_idx: int = 6
 var player_move_points: int = 0
 var enemy_move_points: int = 0
 var player_navigator_skill: int = 2
 var enemy_navigator_skill: int = 2
-var player_fired_this_turn: bool = false
-var enemy_fired_this_turn: bool = false
-var player_moved_this_turn: bool = false
 var enemy_behavior: String = "engage"
+var player_plan_end_pos: Vector2 = Vector2.ZERO
+var player_plan_end_heading: float = 0.0
+var player_plan_volley_when_in_range: bool = true
+var player_plan_board: bool = false
+var enemy_plan_end_pos: Vector2 = Vector2.ZERO
+var enemy_plan_end_heading: float = 0.0
+var enemy_plan_volley_when_in_range: bool = false
+var enemy_plan_board: bool = false
+var player_cannon_reload_turns_remaining: int = 0
+var enemy_cannon_reload_turns_remaining: int = 0
+var player_hull_battle_start: int = 16
+var enemy_hull_battle_start: int = 16
+var player_crew_battle_start: int = 24
+var enemy_crew_battle_start: int = 24
+var _completed_wego_rounds: int = 0
 var hazard_cells: Dictionary = {}
 const TURN_STEP_DEG := 15.0
+const DISENGAGE_MIN_CELL_DIST := 26.0
+const CANNON_RELOAD_BASE_ROUNDS := 3
+const CANNON_RELOAD_MAX_ROUNDS := 10
+const CANNON_RELOAD_HULL_STRAIN_MAX := 2.35
+const CANNON_RELOAD_CREW_STRAIN_MAX := 1.85
+const CANNON_RELOAD_FATIGUE_MAX := 1.55
+const CANNON_RELOAD_FATIGUE_PER_ROUND := 0.024
 
 func start_battle(context: Dictionary = {}) -> void:
-	phase = Phase.PLAYER_TURN
+	phase = Phase.PLANNING
 	player_ship_class = str(context.get("player_ship_class", "Sloop"))
 	enemy_ship_class = str(context.get("enemy_ship_class", "Brig"))
 
@@ -56,12 +74,17 @@ func start_battle(context: Dictionary = {}) -> void:
 	enemy_hull = int(enemy_stats.get("hull", 16))
 	player_crew = int(player_stats.get("crew", 24))
 	enemy_crew = int(enemy_stats.get("crew", 24))
+	player_hull_battle_start = player_hull
+	enemy_hull_battle_start = enemy_hull
+	player_crew_battle_start = player_crew
+	enemy_crew_battle_start = enemy_crew
+	_completed_wego_rounds = 0
 	player_has_boarding_advantage = false
 	enemy_has_boarding_advantage = false
-	player_cell_pos = Vector2(10.0, 17.0)
-	enemy_cell_pos = Vector2(30.0, 6.0)
-	player_cell = Vector2i(10, 17)
-	enemy_cell = Vector2i(30, 6)
+	player_cell_pos = Vector2(32.0, 26.0)
+	enemy_cell_pos = Vector2(54.0, 22.0)
+	player_cell = Vector2i(32, 26)
+	enemy_cell = Vector2i(54, 22)
 	player_heading_deg = _vector_to_bearing_deg(context.get("player_heading", Vector2.RIGHT))
 	enemy_heading_deg = _vector_to_bearing_deg(context.get("enemy_heading", Vector2.LEFT))
 	player_heading_idx = _bearing_to_heading_idx(player_heading_deg)
@@ -73,302 +96,357 @@ func start_battle(context: Dictionary = {}) -> void:
 	wind_direction_deg = float(wind_data.get("direction_deg", 90.0))
 	wind_speed_m_s = float(wind_data.get("speed_m_s", 6.0))
 	enemy_behavior = "engage" if bool(context.get("enemy_wants_pursuit", true)) else "escape"
+	player_cannon_reload_turns_remaining = 0
+	enemy_cannon_reload_turns_remaining = 0
 	_generate_hazards(bool(context.get("near_land", false)))
 	_sync_pose_from_positions()
-	_begin_player_turn()
+	_begin_planning_round()
 	emit_signal(
 		"battle_updated",
-		"Enemy %s sighted. You command a %s. Controls: Up=Advance, Left/Right=Turn+Advance, Enter=Fire, Space=Board, Down=End Turn." % [
+		"Enemy %s sighted. You command a %s. WEGO: plan movement, optional Volley if in range, Show gun range to preview arcs, grapple order, then Commit. F toggles gun-range overlay. X breaks off when clear." % [
 			enemy_ship_class,
 			player_ship_class
 		]
 	)
 
-func player_turn_rotate(delta_deg: float) -> void:
-	if phase != Phase.PLAYER_TURN:
-		return
-	var turn_cost: int = _turn_cost_for(player_ship_class)
-	if player_move_points < turn_cost:
-		emit_signal("battle_updated", "No movement points left. Fire or end turn.")
-		return
-	var turn_dir: float = 1.0 if delta_deg > 0.0 else -1.0
-	var next_heading_deg: float = fposmod(player_heading_deg + turn_dir * TURN_STEP_DEG, 360.0)
-	var turn_forward: float = _turn_forward_cells(player_ship_class, next_heading_deg)
-	var next_pos: Vector2 = player_cell_pos + _bearing_deg_to_vector(next_heading_deg) * turn_forward
-	if not _is_valid_pos(next_pos) or next_pos.distance_to(enemy_cell_pos) < 1.0:
-		emit_signal("battle_updated", "Cannot turn %s: forward arc blocked." % ("starboard" if turn_dir > 0 else "port"))
-		return
-	player_heading_deg = next_heading_deg
-	player_heading_idx = _bearing_to_heading_idx(player_heading_deg)
-	player_cell_pos = next_pos
-	_sync_pose_from_positions()
-	if _check_collision_with_hazard(player_cell):
-		return
-	player_moved_this_turn = true
-	player_move_points -= turn_cost
-	emit_signal(
-		"battle_updated",
-		"You turn %s and surge forward (cost %d MP). MP %d." % [
-			("starboard" if turn_dir > 0 else "port"),
-			turn_cost,
-			player_move_points
-		]
-	)
-
-func player_turn_advance() -> void:
-	if phase != Phase.PLAYER_TURN:
-		return
-	if player_move_points <= 0:
-		emit_signal("battle_updated", "No movement points left. Fire or end turn.")
-		return
-	var step_cells: float = _forward_cells_per_step(player_ship_class, player_heading_deg)
-	var next_pos: Vector2 = player_cell_pos + _bearing_deg_to_vector(player_heading_deg) * step_cells
-	if _is_valid_pos(next_pos) and next_pos.distance_to(enemy_cell_pos) >= 1.0:
-		player_cell_pos = next_pos
-		_sync_pose_from_positions()
-		if _check_collision_with_hazard(player_cell):
-			return
-		player_moved_this_turn = true
-		player_move_points -= 1
-		emit_signal("battle_updated", "You advance %.1f squares. MP %d." % [step_cells, player_move_points])
-	else:
-		emit_signal("battle_updated", "Cannot advance: obstacle or map edge.")
-
-func player_end_turn() -> void:
-	if phase != Phase.PLAYER_TURN:
-		return
-	if not player_moved_this_turn:
-		var coast_cells: float = _forward_cells_per_step(player_ship_class, player_heading_deg) * 0.55
-		var coast_pos: Vector2 = player_cell_pos + _bearing_deg_to_vector(player_heading_deg) * coast_cells
-		if _is_valid_pos(coast_pos) and coast_pos.distance_to(enemy_cell_pos) >= 1.0:
-			player_cell_pos = coast_pos
-			_sync_pose_from_positions()
-			if _check_collision_with_hazard(player_cell):
-				return
-			emit_signal("battle_updated", "Your ship coasts forward as the turn ends.")
-		else:
-			emit_signal("battle_updated", "Your ship attempts to coast, but cannot safely advance.")
-	phase = Phase.ENEMY_TURN
-	emit_signal("battle_updated", "You hold course and pass the turn.")
-
-func player_fire_cannons() -> void:
-	if phase != Phase.PLAYER_TURN:
-		return
-	if player_fired_this_turn:
-		emit_signal("battle_updated", "You already fired this turn.")
-		return
-	var shot: Dictionary = _resolve_cannon_shot(player_position, player_heading_deg, player_ship_class, enemy_position, enemy_heading_deg)
-	if not bool(shot.get("can_fire", false)):
-		emit_signal("battle_updated", "No firing solution. Bring target to broadside or chase-gun arc.")
-		return
-	var damage: int = int(shot.get("damage", 0))
-	var shot_type: String = str(shot.get("shot_type", "broadside"))
-	var raking_bonus: bool = bool(shot.get("raking", false))
-	enemy_hull = max(0, enemy_hull - damage)
-	player_has_boarding_advantage = true
-	player_fired_this_turn = true
-	var rake_text: String = " Raking hit!" if raking_bonus else ""
-	emit_signal("battle_updated", "Player %s hits for %d hull damage.%s" % [shot_type, damage, rake_text])
-	_check_resolution_only()
-	if phase != Phase.RESOLVED:
-		if player_move_points > 0:
-			emit_signal("battle_updated", "Cannons fired. You may still maneuver with remaining movement points.")
-		else:
-			emit_signal("battle_updated", "Cannons fired. No movement points left; end turn when ready.")
-
-func can_player_fire_now() -> bool:
-	if phase != Phase.PLAYER_TURN or player_fired_this_turn:
+func set_player_planned_move_cell(target_cell: Vector2i) -> bool:
+	if phase != Phase.PLANNING:
 		return false
-	var shot: Dictionary = _resolve_cannon_shot(player_position, player_heading_deg, player_ship_class, enemy_position, enemy_heading_deg)
-	return bool(shot.get("can_fire", false))
+	var built: Dictionary = _build_movement_states(
+		player_cell_pos,
+		player_heading_deg,
+		player_move_points,
+		player_ship_class,
+		enemy_cell_pos,
+		player_cell
+	)
+	var states: Array = built["states"]
+	var best_index: int = -1
+	var best_mp: int = -1
+	for i in range(states.size()):
+		var s_variant: Variant = states[i]
+		if not (s_variant is Dictionary):
+			continue
+		var s: Dictionary = s_variant
+		var cell: Vector2i = s["cell"]
+		if cell != target_cell:
+			continue
+		var mp: int = int(s["mp"])
+		if mp > best_mp:
+			best_mp = mp
+			best_index = i
+	if best_index < 0:
+		return false
+	var selected: Dictionary = states[best_index]
+	player_plan_end_pos = selected["pos"]
+	player_plan_end_heading = float(selected["heading_deg"])
+	return true
+
+func player_toggle_volley_when_in_range() -> void:
+	if phase != Phase.PLANNING:
+		return
+	player_plan_volley_when_in_range = not player_plan_volley_when_in_range
+	if player_plan_volley_when_in_range:
+		emit_signal(
+			"battle_updated",
+			"Gunnery: fire a controlled volley only if the enemy bears in arc and range after this round's movement."
+		)
+	else:
+		emit_signal("battle_updated", "Gunnery: hold fire this round.")
 
 func player_attempt_boarding() -> void:
-	if phase != Phase.PLAYER_TURN:
+	if phase != Phase.PLANNING:
 		return
-	if _grid_chebyshev_distance(player_cell, enemy_cell) > 1:
-		emit_signal("battle_updated", "Too far to grapple. Close the distance first.")
+	if player_plan_board:
+		player_plan_board = false
+		emit_signal("battle_updated", "Boarding order cancelled.")
 		return
-	var chance := 0.38
-	var crew_ratio: float = float(player_crew) / float(max(1, enemy_crew))
-	chance += clampf((crew_ratio - 1.0) * 0.2, -0.12, 0.2)
-	if _is_target_stern_arc(player_position, enemy_position, enemy_heading_deg):
-		chance += 0.08
-	if player_has_boarding_advantage:
-		chance += 0.25
-	var success := randf() <= chance
-	if success:
-		emit_signal("battle_updated", "Player grapples enemy ship. Boarding begins!")
-		emit_signal("boarding_started", true)
-		return
-
-	emit_signal("battle_updated", "Boarding failed. Enemy repels the assault.")
-	phase = Phase.ENEMY_TURN
-	enemy_has_boarding_advantage = true
+	player_plan_board = true
+	player_plan_volley_when_in_range = true
+	emit_signal("battle_updated", "Orders: grapple if you end adjacent to the enemy after this round's movement.")
 
 func can_player_board_now() -> bool:
-	if phase != Phase.PLAYER_TURN:
+	return phase == Phase.PLANNING
+
+func get_ship_separation() -> float:
+	return player_cell_pos.distance_to(enemy_cell_pos)
+
+func can_player_disengage() -> bool:
+	if phase != Phase.PLANNING:
 		return false
-	return _grid_chebyshev_distance(player_cell, enemy_cell) <= 1
+	return get_ship_separation() >= DISENGAGE_MIN_CELL_DIST
 
-func enemy_take_turn() -> void:
-	if phase != Phase.ENEMY_TURN:
+func player_disengage() -> void:
+	if phase != Phase.PLANNING:
 		return
-	_begin_enemy_turn()
-
-	if enemy_hull <= 5 and randf() < 0.45 and _grid_chebyshev_distance(enemy_cell, player_cell) <= 1:
-		_enemy_attempt_boarding()
+	if not can_player_disengage():
+		emit_signal("battle_updated", "Enemy is still too close to break off safely.")
 		return
+	_finish_mutual_disengage(true)
 
-	while enemy_move_points > 0:
-		if enemy_behavior == "escape":
-			_enemy_escape_step()
-		else:
-			_enemy_maneuver_step()
-		enemy_move_points -= 1
-		if _check_collision_with_hazard(enemy_cell):
-			return
+func _finish_mutual_disengage(player_initiated: bool) -> void:
+	if phase == Phase.RESOLVED:
+		return
+	phase = Phase.RESOLVED
+	var msg: String
+	if player_initiated:
+		msg = "You haul off and break contact; the enemy does not close again this day."
+	else:
+		msg = "Distance opens between the squadrons; the engagement is broken off."
+	emit_signal("battle_updated", msg)
+	emit_signal("battle_finished", false, true)
 
-	var enemy_shot: Dictionary = _resolve_cannon_shot(enemy_position, enemy_heading_deg, enemy_ship_class, player_position, player_heading_deg)
-	if bool(enemy_shot.get("can_fire", false)) and not enemy_fired_this_turn:
-		var damage: int = int(enemy_shot.get("damage", 0))
-		var shot_type: String = str(enemy_shot.get("shot_type", "broadside"))
-		var raking_bonus: bool = bool(enemy_shot.get("raking", false))
+func player_commit_orders() -> void:
+	if phase != Phase.PLANNING:
+		return
+	if get_ship_separation() >= DISENGAGE_MIN_CELL_DIST and enemy_behavior == "escape":
+		_finish_mutual_disengage(false)
+		return
+	_build_enemy_plan()
+	_resolve_simultaneous_round()
+
+func _score_enemy_destination_cell(cell: Vector2i, player_goal: Vector2) -> float:
+	var dx: float = float(cell.x) - player_goal.x
+	var dy: float = float(cell.y) - player_goal.y
+	var dist: float = sqrt(dx * dx + dy * dy)
+	if enemy_behavior == "escape":
+		return dist + randf() * 0.4
+	return -dist + randf() * 0.35
+
+func _build_enemy_plan() -> void:
+	# Blind planning: enemy only sees your current pose, not your plotted move or aim.
+	var player_observed: Vector2 = player_cell_pos
+	var built: Dictionary = _build_movement_states(
+		enemy_cell_pos,
+		enemy_heading_deg,
+		enemy_move_points,
+		enemy_ship_class,
+		player_observed,
+		enemy_cell
+	)
+	var reachable: Dictionary = built["reachable"]
+	var states: Array = built["states"]
+	var player_cell_now: Vector2i = player_cell
+	var best_cell: Vector2i = enemy_cell
+	var best_score: float = -INF
+	for c in reachable.keys():
+		if not (c is Vector2i):
+			continue
+		var cell: Vector2i = c
+		if cell == player_cell_now:
+			continue
+		var sc: float = _score_enemy_destination_cell(cell, player_observed)
+		if sc > best_score:
+			best_score = sc
+			best_cell = cell
+	var best_index: int = -1
+	var best_mp: int = -1
+	for i in range(states.size()):
+		var s_variant: Variant = states[i]
+		if not (s_variant is Dictionary):
+			continue
+		var s: Dictionary = s_variant
+		if s["cell"] != best_cell:
+			continue
+		var mp: int = int(s["mp"])
+		if mp > best_mp:
+			best_mp = mp
+			best_index = i
+	if best_index < 0:
+		enemy_plan_end_pos = enemy_cell_pos
+		enemy_plan_end_heading = enemy_heading_deg
+	else:
+		var sel: Dictionary = states[best_index]
+		enemy_plan_end_pos = sel["pos"]
+		enemy_plan_end_heading = float(sel["heading_deg"])
+	var enemy_end_cell: Vector2i = Vector2i(int(round(enemy_plan_end_pos.x)), int(round(enemy_plan_end_pos.y)))
+	if enemy_behavior == "escape":
+		enemy_plan_volley_when_in_range = false
+		enemy_plan_board = false
+	else:
+		enemy_plan_volley_when_in_range = enemy_cannon_reload_turns_remaining <= 0
+		enemy_plan_board = (
+			_grid_chebyshev_distance(enemy_end_cell, player_cell_now) <= 1
+			and randf() < 0.38
+			and enemy_hull > 4
+		)
+
+func _cannon_reload_duration_turns_for_attacker(attacker_is_player: bool) -> int:
+	var hull0: int = player_hull_battle_start if attacker_is_player else enemy_hull_battle_start
+	var hull_cur: int = player_hull if attacker_is_player else enemy_hull
+	var crew0: int = player_crew_battle_start if attacker_is_player else enemy_crew_battle_start
+	var crew_cur: int = player_crew if attacker_is_player else enemy_crew
+	var hull_strain: float = float(max(1, hull0)) / float(max(1, hull_cur))
+	hull_strain = clampf(hull_strain, 1.0, CANNON_RELOAD_HULL_STRAIN_MAX)
+	var crew_strain: float = float(max(1, crew0)) / float(max(1, crew_cur))
+	crew_strain = clampf(crew_strain, 1.0, CANNON_RELOAD_CREW_STRAIN_MAX)
+	var fatigue: float = 1.0 + CANNON_RELOAD_FATIGUE_PER_ROUND * float(_completed_wego_rounds)
+	fatigue = clampf(fatigue, 1.0, CANNON_RELOAD_FATIGUE_MAX)
+	var raw: float = float(CANNON_RELOAD_BASE_ROUNDS) * hull_strain * crew_strain * fatigue
+	return clampi(ceili(raw), CANNON_RELOAD_BASE_ROUNDS, CANNON_RELOAD_MAX_ROUNDS)
+
+
+func _advance_cannon_reload_after_round(player_battery_hit: bool, enemy_battery_hit: bool) -> void:
+	if not player_battery_hit and player_cannon_reload_turns_remaining > 0:
+		player_cannon_reload_turns_remaining -= 1
+	if not enemy_battery_hit and enemy_cannon_reload_turns_remaining > 0:
+		enemy_cannon_reload_turns_remaining -= 1
+	_completed_wego_rounds += 1
+
+
+func _resolve_volley_orders_if_in_range(
+	ordered: bool,
+	attacker_pos_norm: Vector2,
+	attacker_heading: float,
+	attacker_class: String,
+	defender_pos_norm: Vector2,
+	defender_heading: float,
+	attacker_is_player: bool
+) -> bool:
+	if not ordered:
+		return false
+	if attacker_is_player and player_cannon_reload_turns_remaining > 0:
+		emit_signal(
+			"battle_updated",
+			"Your gun crews are still running out the tackles—%d more round(s) before the battery can volley again."
+			% player_cannon_reload_turns_remaining
+		)
+		return false
+	if not attacker_is_player and enemy_cannon_reload_turns_remaining > 0:
+		emit_signal("battle_updated", "Enemy holds fire; their battery is still reloading.")
+		return false
+	var shot: Dictionary = _resolve_cannon_shot(
+		attacker_pos_norm, attacker_heading, attacker_class, defender_pos_norm, defender_heading
+	)
+	var who_battery: String = "Your" if attacker_is_player else "Enemy"
+	if not bool(shot.get("can_fire", false)):
+		emit_signal("battle_updated", "%s guns: no firing solution on the target after movement." % who_battery)
+		return false
+	var damage: int = int(shot.get("damage", 0))
+	var shot_type: String = str(shot.get("shot_type", "broadside"))
+	var rake_text: String = " Raking hit!" if bool(shot.get("raking", false)) else ""
+	if attacker_is_player:
+		enemy_hull = max(0, enemy_hull - damage)
+		player_has_boarding_advantage = true
+		player_cannon_reload_turns_remaining = _cannon_reload_duration_turns_for_attacker(true)
+		emit_signal("battle_updated", "Your %s strikes for %d hull damage.%s" % [shot_type, damage, rake_text])
+	else:
 		player_hull = max(0, player_hull - damage)
 		enemy_has_boarding_advantage = true
-		enemy_fired_this_turn = true
-		var rake_text: String = " Raking hit!" if raking_bonus else ""
+		enemy_cannon_reload_turns_remaining = _cannon_reload_duration_turns_for_attacker(false)
 		emit_signal("battle_updated", "Enemy %s strikes for %d hull damage.%s" % [shot_type, damage, rake_text])
-		_check_resolution_or_pass_turn()
-		return
+	return true
 
-	emit_signal("battle_updated", "Enemy maneuvers for better wind and angle.")
-	_check_resolution_or_pass_turn()
+func _resolve_simultaneous_round() -> void:
+	var e_pos_save: Vector2 = enemy_cell_pos
+	var e_h_save: float = enemy_heading_deg
+	player_cell_pos = player_plan_end_pos
+	player_heading_deg = player_plan_end_heading
+	player_heading_idx = _bearing_to_heading_idx(player_heading_deg)
+	enemy_cell_pos = enemy_plan_end_pos
+	enemy_heading_deg = enemy_plan_end_heading
+	enemy_heading_idx = _bearing_to_heading_idx(enemy_heading_deg)
+	_sync_pose_from_positions()
+	if player_cell == enemy_cell:
+		player_cell_pos = player_plan_end_pos
+		player_heading_deg = player_plan_end_heading
+		enemy_cell_pos = e_pos_save
+		enemy_heading_deg = e_h_save
+		player_heading_idx = _bearing_to_heading_idx(player_heading_deg)
+		enemy_heading_idx = _bearing_to_heading_idx(enemy_heading_deg)
+		_sync_pose_from_positions()
+		emit_signal("battle_updated", "Both ordered the same sea room—you hold it; the enemy backs water.")
+	if _check_collision_with_hazard(player_cell):
+		_advance_cannon_reload_after_round(false, false)
+		return
+	if _check_collision_with_hazard_enemy(enemy_cell):
+		_advance_cannon_reload_after_round(false, false)
+		return
+	var p_norm: Vector2 = player_position
+	var e_norm: Vector2 = enemy_position
+	var p_h: float = player_heading_deg
+	var e_h: float = enemy_heading_deg
+	var player_battery_hit: bool = _resolve_volley_orders_if_in_range(
+		player_plan_volley_when_in_range, p_norm, p_h, player_ship_class, e_norm, e_h, true
+	)
+	if enemy_hull <= 0:
+		_advance_cannon_reload_after_round(player_battery_hit, false)
+		_check_resolution_only()
+		return
+	var enemy_battery_hit: bool = _resolve_volley_orders_if_in_range(
+		enemy_plan_volley_when_in_range, e_norm, e_h, enemy_ship_class, p_norm, p_h, false
+	)
+	if enemy_hull <= 0 or player_hull <= 0:
+		_advance_cannon_reload_after_round(player_battery_hit, enemy_battery_hit)
+		_check_resolution_only()
+		if phase != Phase.RESOLVED:
+			_begin_planning_round()
+		return
+	if player_plan_board and _grid_chebyshev_distance(player_cell, enemy_cell) <= 1:
+		var chance := 0.38
+		var crew_ratio: float = float(player_crew) / float(max(1, enemy_crew))
+		chance += clampf((crew_ratio - 1.0) * 0.2, -0.12, 0.2)
+		if _is_target_stern_arc(player_position, enemy_position, enemy_heading_deg):
+			chance += 0.08
+		if player_has_boarding_advantage:
+			chance += 0.25
+		if randf() <= chance:
+			_advance_cannon_reload_after_round(player_battery_hit, enemy_battery_hit)
+			emit_signal("battle_updated", "Your crew throws the grapples home!")
+			emit_signal("boarding_started", true)
+			return
+		emit_signal("battle_updated", "Grappling attempt fails; lines part.")
+		enemy_has_boarding_advantage = true
+	elif enemy_plan_board and _grid_chebyshev_distance(enemy_cell, player_cell) <= 1:
+		var ech := 0.34
+		var crew_ratio_e: float = float(enemy_crew) / float(max(1, player_crew))
+		ech += clampf((crew_ratio_e - 1.0) * 0.2, -0.12, 0.2)
+		if enemy_has_boarding_advantage:
+			ech += 0.2
+		if randf() <= ech:
+			_advance_cannon_reload_after_round(player_battery_hit, enemy_battery_hit)
+			emit_signal("battle_updated", "Enemy hooks your rail!")
+			emit_signal("boarding_started", false)
+			return
+		emit_signal("battle_updated", "Enemy boarders cannot secure a purchase.")
+	_advance_cannon_reload_after_round(player_battery_hit, enemy_battery_hit)
+	emit_signal("battle_updated", "Round complete. New orders.")
+	_check_resolution_or_planning()
+
+func _check_resolution_or_planning() -> void:
+	if enemy_hull <= 0:
+		phase = Phase.RESOLVED
+		emit_signal("battle_updated", "Enemy ship sinks. Victory!")
+		emit_signal("battle_finished", true, false)
+		return
+	if player_hull <= 0:
+		phase = Phase.RESOLVED
+		emit_signal("battle_updated", "Your ship is lost. Defeat.")
+		emit_signal("battle_finished", false, false)
+		return
+	_begin_planning_round()
 
 func resolve_boarding_result(defender_successful: bool) -> void:
 	if defender_successful:
 		emit_signal("battle_updated", "Defense held. You can counter-board now.")
-		phase = Phase.PLAYER_TURN
 		player_has_boarding_advantage = true
+		_begin_planning_round()
 	else:
 		enemy_hull = max(0, enemy_hull - 6)
 		emit_signal("battle_updated", "Boarding assault succeeded. Enemy ship is crippled.")
-		_check_resolution_or_pass_turn()
-
-func _enemy_attempt_boarding() -> void:
-	var chance := 0.34
-	var crew_ratio: float = float(enemy_crew) / float(max(1, player_crew))
-	chance += clampf((crew_ratio - 1.0) * 0.2, -0.12, 0.2)
-	if enemy_has_boarding_advantage:
-		chance += 0.2
-	var success := randf() <= chance
-	if success:
-		emit_signal("battle_updated", "Enemy boards your ship. Defend the deck!")
-		emit_signal("boarding_started", false)
-		return
-	emit_signal("battle_updated", "Enemy boarding attempt fails.")
-	phase = Phase.PLAYER_TURN
-
-func _check_resolution_or_pass_turn() -> void:
-	if enemy_hull <= 0:
-		phase = Phase.RESOLVED
-		emit_signal("battle_updated", "Enemy ship sinks. Victory!")
-		emit_signal("battle_finished", true)
-		return
-
-	if player_hull <= 0:
-		phase = Phase.RESOLVED
-		emit_signal("battle_updated", "Your ship is lost. Defeat.")
-		emit_signal("battle_finished", false)
-		return
-
-	if phase == Phase.PLAYER_TURN:
-		phase = Phase.ENEMY_TURN
-	else:
-		_begin_player_turn()
+		_check_resolution_or_planning()
 
 func _check_resolution_only() -> void:
 	if enemy_hull <= 0:
 		phase = Phase.RESOLVED
 		emit_signal("battle_updated", "Enemy ship sinks. Victory!")
-		emit_signal("battle_finished", true)
+		emit_signal("battle_finished", true, false)
 		return
 
 	if player_hull <= 0:
 		phase = Phase.RESOLVED
 		emit_signal("battle_updated", "Your ship is lost. Defeat.")
-		emit_signal("battle_finished", false)
-
-func _pass_turn_to_enemy() -> void:
-	if phase == Phase.RESOLVED:
-		return
-	phase = Phase.ENEMY_TURN
-
-func _enemy_maneuver_step() -> void:
-	var to_player: Vector2 = (player_position - enemy_position).normalized()
-	var bearing_to_player: float = _vector_to_bearing_deg(to_player)
-	var target_heading_a: float = fposmod(bearing_to_player + 90.0, 360.0)
-	var target_heading_b: float = fposmod(bearing_to_player - 90.0, 360.0)
-	var delta_a: float = absf(_angle_delta_deg(enemy_heading_deg, target_heading_a))
-	var delta_b: float = absf(_angle_delta_deg(enemy_heading_deg, target_heading_b))
-	var chosen_target: float = target_heading_a if delta_a < delta_b else target_heading_b
-	var turn_delta: float = _angle_delta_deg(enemy_heading_deg, chosen_target)
-	if absf(turn_delta) > 12.0 and randf() < 0.7:
-		var signed_turn: float = clampf(turn_delta, -TURN_STEP_DEG, TURN_STEP_DEG)
-		var new_heading_deg: float = fposmod(enemy_heading_deg + signed_turn, 360.0)
-		var turn_forward: float = _turn_forward_cells(enemy_ship_class, new_heading_deg)
-		var turn_next: Vector2 = enemy_cell_pos + _bearing_deg_to_vector(new_heading_deg) * turn_forward
-		if _is_valid_pos(turn_next) and turn_next.distance_to(player_cell_pos) >= 1.0:
-			enemy_heading_deg = new_heading_deg
-			enemy_heading_idx = _bearing_to_heading_idx(enemy_heading_deg)
-			enemy_cell_pos = turn_next
-		else:
-			var fallback: Vector2 = enemy_cell_pos + _bearing_deg_to_vector(enemy_heading_deg) * _forward_cells_per_step(enemy_ship_class, enemy_heading_deg)
-			if _is_valid_pos(fallback) and fallback.distance_to(player_cell_pos) >= 1.0:
-				enemy_cell_pos = fallback
-	else:
-		var next: Vector2 = enemy_cell_pos + _bearing_deg_to_vector(enemy_heading_deg) * _forward_cells_per_step(enemy_ship_class, enemy_heading_deg)
-		if _is_valid_pos(next) and next.distance_to(player_cell_pos) >= 1.0:
-			enemy_cell_pos = next
-	_sync_pose_from_positions()
-
-func _enemy_escape_step() -> void:
-	var away: Vector2 = (enemy_position - player_position).normalized()
-	if away.length() <= 0.001:
-		away = _bearing_deg_to_vector(enemy_heading_deg)
-	var desired_heading: float = _vector_to_bearing_deg(away)
-	var turn_delta: float = _angle_delta_deg(enemy_heading_deg, desired_heading)
-	var signed_turn: float = clampf(turn_delta, -TURN_STEP_DEG, TURN_STEP_DEG)
-	enemy_heading_deg = fposmod(enemy_heading_deg + signed_turn, 360.0)
-	enemy_heading_idx = _bearing_to_heading_idx(enemy_heading_deg)
-	var next: Vector2 = enemy_cell_pos + _bearing_deg_to_vector(enemy_heading_deg) * _forward_cells_per_step(enemy_ship_class, enemy_heading_deg)
-	if _is_valid_pos(next) and next.distance_to(player_cell_pos) >= 1.0:
-		enemy_cell_pos = next
-	_sync_pose_from_positions()
-
-func _advance_position(start: Vector2, heading_deg: float, ship_class: String) -> Vector2:
-	var heading_vec: Vector2 = _bearing_deg_to_vector(heading_deg)
-	var move_dist: float = _move_distance_units(ship_class, heading_deg)
-	var next: Vector2 = start + heading_vec * move_dist
-	next.x = clampf(next.x, 0.06, 0.94)
-	next.y = clampf(next.y, 0.12, 0.88)
-	return next
-
-func _move_distance_units(ship_class: String, heading_deg: float) -> float:
-	var base: float = _ship_stats(ship_class).get("maneuver", 0.055)
-	var wind_to_deg: float = fposmod(wind_direction_deg + 180.0, 360.0)
-	var diff: float = absf(_angle_delta_deg(heading_deg, wind_to_deg))
-	var angle_factor: float = lerpf(1.25, 0.5, diff / 180.0)
-	var wind_knots: float = wind_speed_m_s * 1.94384
-	var wind_factor: float = clampf(0.75 + (wind_knots / 30.0), 0.65, 1.3)
-	return base * angle_factor * wind_factor
-
-func _has_cannon_solution(attacker_pos: Vector2, attacker_heading_deg: float, attacker_class: String, target_pos: Vector2) -> bool:
-	var dist: float = attacker_pos.distance_to(target_pos)
-	if dist > _cannon_range(attacker_class):
-		return false
-	var bearing_to_target: float = _vector_to_bearing_deg((target_pos - attacker_pos).normalized())
-	var rel: float = absf(_angle_delta_deg(attacker_heading_deg, bearing_to_target))
-	return absf(rel - 90.0) <= 42.0
+		emit_signal("battle_finished", false, false)
 
 func _resolve_cannon_shot(attacker_pos: Vector2, attacker_heading_deg: float, attacker_class: String, target_pos: Vector2, target_heading_deg: float) -> Dictionary:
 	var dist: float = attacker_pos.distance_to(target_pos)
@@ -434,16 +512,14 @@ func _roll_cannon_damage(ship_class: String, dist: float) -> int:
 	var raw: float = float(randi_range(max(1, broadside_base - 1), broadside_base + 2)) * range_factor
 	return max(1, int(round(raw)))
 
-func _begin_player_turn() -> void:
-	phase = Phase.PLAYER_TURN
+func _begin_planning_round() -> void:
+	phase = Phase.PLANNING
 	player_move_points = _movement_points_for(player_ship_class, player_navigator_skill, player_heading_deg)
-	player_fired_this_turn = false
-	player_moved_this_turn = false
-
-func _begin_enemy_turn() -> void:
-	phase = Phase.ENEMY_TURN
 	enemy_move_points = _movement_points_for(enemy_ship_class, enemy_navigator_skill, enemy_heading_deg)
-	enemy_fired_this_turn = false
+	player_plan_end_pos = player_cell_pos
+	player_plan_end_heading = player_heading_deg
+	player_plan_volley_when_in_range = false
+	player_plan_board = false
 
 func _movement_points_for(ship_class: String, navigator_skill: int, heading_deg: float) -> int:
 	var base_mp: int = int(_ship_stats(ship_class).get("base_mp", 4))
@@ -474,7 +550,16 @@ func get_enemy_turn_cost() -> int:
 	return _turn_cost_for(enemy_ship_class)
 
 func get_player_movement_preview() -> Dictionary:
-	var built: Dictionary = _build_player_movement_states()
+	if phase != Phase.PLANNING:
+		return {"reachable_cells": [], "forward_cells": [], "forward_step_cells": 1.0}
+	var built: Dictionary = _build_movement_states(
+		player_cell_pos,
+		player_heading_deg,
+		player_move_points,
+		player_ship_class,
+		enemy_cell_pos,
+		player_cell
+	)
 	var reachable: Dictionary = built["reachable"]
 	var forward_cells: Array[Vector2i] = built["forward_cells"]
 	var reachable_cells: Array[Vector2i] = []
@@ -500,37 +585,7 @@ func can_player_move_to_cell(cell: Vector2i) -> bool:
 	return false
 
 func execute_player_move_to_cell(target_cell: Vector2i) -> bool:
-	if phase != Phase.PLAYER_TURN:
-		return false
-	var built: Dictionary = _build_player_movement_states()
-	var states: Array = built["states"]
-	var best_index: int = -1
-	var best_mp: int = -1
-	for i in range(states.size()):
-		var s_variant: Variant = states[i]
-		if not (s_variant is Dictionary):
-			continue
-		var s: Dictionary = s_variant
-		var cell: Vector2i = s["cell"]
-		if cell != target_cell:
-			continue
-		var mp: int = int(s["mp"])
-		if mp > best_mp:
-			best_mp = mp
-			best_index = i
-	if best_index < 0:
-		return false
-
-	var selected: Dictionary = states[best_index]
-	player_cell_pos = selected["pos"]
-	player_heading_deg = float(selected["heading_deg"])
-	player_heading_idx = _bearing_to_heading_idx(player_heading_deg)
-	player_move_points = int(selected["mp"])
-	player_moved_this_turn = true
-	_sync_pose_from_positions()
-	if _check_collision_with_hazard(player_cell):
-		return true
-	return true
+	return set_player_planned_move_cell(target_cell)
 
 func get_hazard_cells() -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
@@ -555,25 +610,40 @@ func _check_collision_with_hazard(cell: Vector2i) -> bool:
 		return false
 	phase = Phase.RESOLVED
 	emit_signal("battle_updated", "Your ship strikes coastal hazards and is lost.")
-	emit_signal("battle_finished", false)
+	emit_signal("battle_finished", false, false)
 	return true
 
-func _build_player_movement_states() -> Dictionary:
+func _check_collision_with_hazard_enemy(cell: Vector2i) -> bool:
+	if not hazard_cells.has(cell):
+		return false
+	phase = Phase.RESOLVED
+	emit_signal("battle_updated", "The enemy is thrown onto the shoals and breaks up.")
+	emit_signal("battle_finished", true, false)
+	return true
+
+func _build_movement_states(
+	start_pos: Vector2,
+	start_heading: float,
+	start_mp: int,
+	ship_class: String,
+	other_ship_pos: Vector2,
+	start_cell: Vector2i
+) -> Dictionary:
 	var reachable: Dictionary = {}
 	var forward_cells: Array[Vector2i] = []
 	var open: Array[Dictionary] = [{
-		"pos": player_cell_pos,
-		"heading_deg": player_heading_deg,
-		"mp": player_move_points
+		"pos": start_pos,
+		"heading_deg": start_heading,
+		"mp": start_mp
 	}]
 	var all_states: Array[Dictionary] = [{
-		"pos": player_cell_pos,
-		"heading_deg": player_heading_deg,
-		"mp": player_move_points,
-		"cell": player_cell
+		"pos": start_pos,
+		"heading_deg": start_heading,
+		"mp": start_mp,
+		"cell": start_cell
 	}]
 	var seen: Dictionary = {}
-	var turn_cost: int = _turn_cost_for(player_ship_class)
+	var turn_cost: int = _turn_cost_for(ship_class)
 
 	while not open.is_empty():
 		var state: Dictionary = open.pop_front()
@@ -589,9 +659,9 @@ func _build_player_movement_states() -> Dictionary:
 		reachable[cell] = true
 
 		if mp >= 1:
-			var step_cells: float = _forward_cells_per_step(player_ship_class, heading_deg)
+			var step_cells: float = _forward_cells_per_step(ship_class, heading_deg)
 			var next_pos: Vector2 = pos + _bearing_deg_to_vector(heading_deg) * step_cells
-			if _is_valid_pos(next_pos) and next_pos.distance_to(enemy_cell_pos) >= 1.0:
+			if _is_valid_pos(next_pos) and next_pos.distance_to(other_ship_pos) >= 1.0:
 				var next_state: Dictionary = {"pos": next_pos, "heading_deg": heading_deg, "mp": mp - 1}
 				open.append(next_state)
 				all_states.append({
@@ -603,10 +673,10 @@ func _build_player_movement_states() -> Dictionary:
 		if mp >= turn_cost:
 			var left_heading_deg: float = fposmod(heading_deg - TURN_STEP_DEG, 360.0)
 			var right_heading_deg: float = fposmod(heading_deg + TURN_STEP_DEG, 360.0)
-			var turn_step: float = _turn_forward_cells(player_ship_class, heading_deg)
+			var turn_step: float = _turn_forward_cells(ship_class, heading_deg)
 			var left_pos: Vector2 = pos + _bearing_deg_to_vector(left_heading_deg) * turn_step
 			var right_pos: Vector2 = pos + _bearing_deg_to_vector(right_heading_deg) * turn_step
-			if _is_valid_pos(left_pos) and left_pos.distance_to(enemy_cell_pos) >= 1.0:
+			if _is_valid_pos(left_pos) and left_pos.distance_to(other_ship_pos) >= 1.0:
 				var left_state: Dictionary = {"pos": left_pos, "heading_deg": left_heading_deg, "mp": mp - turn_cost}
 				open.append(left_state)
 				all_states.append({
@@ -615,7 +685,7 @@ func _build_player_movement_states() -> Dictionary:
 					"mp": mp - turn_cost,
 					"cell": Vector2i(int(round(left_pos.x)), int(round(left_pos.y)))
 				})
-			if _is_valid_pos(right_pos) and right_pos.distance_to(enemy_cell_pos) >= 1.0:
+			if _is_valid_pos(right_pos) and right_pos.distance_to(other_ship_pos) >= 1.0:
 				var right_state: Dictionary = {"pos": right_pos, "heading_deg": right_heading_deg, "mp": mp - turn_cost}
 				open.append(right_state)
 				all_states.append({
@@ -625,10 +695,10 @@ func _build_player_movement_states() -> Dictionary:
 					"cell": Vector2i(int(round(right_pos.x)), int(round(right_pos.y)))
 				})
 
-	var straight_pos: Vector2 = player_cell_pos
-	for _i in range(player_move_points):
-		straight_pos += _bearing_deg_to_vector(player_heading_deg) * _forward_cells_per_step(player_ship_class, player_heading_deg)
-		if not _is_valid_pos(straight_pos) or straight_pos.distance_to(enemy_cell_pos) < 1.0:
+	var straight_pos: Vector2 = start_pos
+	for _i in range(start_mp):
+		straight_pos += _bearing_deg_to_vector(start_heading) * _forward_cells_per_step(ship_class, start_heading)
+		if not _is_valid_pos(straight_pos) or straight_pos.distance_to(other_ship_pos) < 1.0:
 			break
 		forward_cells.append(Vector2i(int(round(straight_pos.x)), int(round(straight_pos.y))))
 
@@ -639,6 +709,8 @@ func _build_player_movement_states() -> Dictionary:
 	}
 
 func get_player_action_guidance() -> Dictionary:
+	if phase != Phase.PLANNING:
+		return {}
 	var turn_cost: int = _turn_cost_for(player_ship_class)
 	var guidance := {
 		"forward": {
@@ -706,17 +778,23 @@ func get_player_action_guidance() -> Dictionary:
 			}
 	return guidance
 
-func get_player_fire_preview_cells() -> Array[Vector2i]:
+func get_player_gun_range_preview_cells() -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
-	if phase != Phase.PLAYER_TURN:
+	if phase != Phase.PLANNING:
 		return cells
+	var att_norm: Vector2 = Vector2(
+		player_plan_end_pos.x / float(max(1, combat_cols - 1)),
+		player_plan_end_pos.y / float(max(1, combat_rows - 1))
+	)
+	var att_h: float = player_plan_end_heading
+	var plan_cell: Vector2i = Vector2i(int(round(player_plan_end_pos.x)), int(round(player_plan_end_pos.y)))
 	for y in range(combat_rows):
 		for x in range(combat_cols):
 			var cell := Vector2i(x, y)
-			if cell == player_cell:
+			if cell == plan_cell:
 				continue
 			var target_pos := Vector2(float(x) / float(max(1, combat_cols - 1)), float(y) / float(max(1, combat_rows - 1)))
-			var shot: Dictionary = _resolve_cannon_shot(player_position, player_heading_deg, player_ship_class, target_pos, enemy_heading_deg)
+			var shot: Dictionary = _resolve_cannon_shot(att_norm, att_h, player_ship_class, target_pos, enemy_heading_deg)
 			if bool(shot.get("can_fire", false)):
 				cells.append(cell)
 	return cells

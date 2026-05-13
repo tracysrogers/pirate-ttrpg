@@ -158,8 +158,9 @@ const SHIP_ACTION_BOARD := 3
 const SHIP_ACTION_DISENGAGE := 4
 const SHIP_ACTION_END_TURN := 5
 const SHIP_COMBAT_ACTION_ROW_Y := 80.0
-const SHIP_NAV_VIEW_COLS := 44
-const SHIP_NAV_VIEW_ROWS := 26
+const SHIP_NAV_VIEW_COLS := 168
+const SHIP_NAV_VIEW_ROWS := 96
+const SHIP_COMBAT_FRAMING_CELL_PAD := 8
 const SHIP_COMBAT_MIN_ZOOM := 0.7
 const SHIP_COMBAT_MAX_ZOOM := 2.2
 const BOARDING_ACTION_MOVE := 0
@@ -304,7 +305,8 @@ func _draw() -> void:
 		draw_rect(Rect2(Vector2(0.0, viewport_size.y * 0.62), Vector2(viewport_size.x, viewport_size.y * 0.38)), Color(0.06, 0.11, 0.18), true)
 		draw_rect(hud_rect, Color(0.02, 0.06, 0.1, 0.45), true)
 		draw_rect(combat_rect, Color(0.08, 0.16, 0.25, 0.45), false, 2.0)
-		_draw_naval_grid(grid_rect, nav_vc, nav_vr)
+		_draw_naval_movement_water_background(grid_rect)
+		_draw_naval_reachable_cell_grid(grid_rect, nav_view_origin, nav_vc, nav_vr, _ship_combat_player_move_grid_cells())
 		_draw_ship_hazards(grid_rect, nav_view_origin, nav_vc, nav_vr)
 		if ship_combat_show_gun_range:
 			_draw_ship_gun_range_overlay(grid_rect, nav_view_origin, nav_vc, nav_vr)
@@ -376,10 +378,7 @@ func _draw() -> void:
 		)
 
 		var player_center := _combat_to_screen(
-			Vector2(
-				p_cell.x / float(max(1, ship_battle.combat_cols - 1)),
-				p_cell.y / float(max(1, ship_battle.combat_rows - 1))
-			),
+			_naval_combat_cell_pos_to_screen_norm(p_cell, ship_battle.combat_cols, ship_battle.combat_rows),
 			grid_rect,
 			ship_battle.combat_cols,
 			ship_battle.combat_rows,
@@ -388,10 +387,7 @@ func _draw() -> void:
 			nav_vr
 		)
 		var enemy_center := _combat_to_screen(
-			Vector2(
-				e_cell.x / float(max(1, ship_battle.combat_cols - 1)),
-				e_cell.y / float(max(1, ship_battle.combat_rows - 1))
-			),
+			_naval_combat_cell_pos_to_screen_norm(e_cell, ship_battle.combat_cols, ship_battle.combat_rows),
 			grid_rect,
 			ship_battle.combat_cols,
 			ship_battle.combat_rows,
@@ -400,13 +396,14 @@ func _draw() -> void:
 			nav_vr
 		)
 		var ship_cell_size: float = minf(grid_rect.size.x / float(nav_vc), grid_rect.size.y / float(nav_vr))
-		_draw_ship_silhouette(player_center, ship_battle.player_ship_class, p_hdg, Color(0.58, 0.44, 0.29), ship_cell_size, 1.0)
+		var pr: int = ship_battle.get_player_port_cannon_reload_turns_remaining()
+		var ps: int = ship_battle.get_player_starboard_cannon_reload_turns_remaining()
+		var er: int = ship_battle.get_enemy_port_cannon_reload_turns_remaining()
+		var es: int = ship_battle.get_enemy_starboard_cannon_reload_turns_remaining()
+		_draw_ship_silhouette(player_center, ship_battle.player_ship_class, p_hdg, Color(0.58, 0.44, 0.29), ship_cell_size, 1.0, pr, ps)
 		if showing_plan_ghost:
 			var ghost_center := _combat_to_screen(
-				Vector2(
-					ship_battle.player_plan_end_pos.x / float(max(1, ship_battle.combat_cols - 1)),
-					ship_battle.player_plan_end_pos.y / float(max(1, ship_battle.combat_rows - 1))
-				),
+				_naval_combat_cell_pos_to_screen_norm(ship_battle.player_plan_end_pos, ship_battle.combat_cols, ship_battle.combat_rows),
 				grid_rect,
 				ship_battle.combat_cols,
 				ship_battle.combat_rows,
@@ -420,9 +417,11 @@ func _draw() -> void:
 				ship_battle.player_plan_end_heading,
 				Color(0.58, 0.44, 0.29),
 				ship_cell_size,
-				0.38
+				0.38,
+				pr,
+				ps
 			)
-		_draw_ship_silhouette(enemy_center, ship_battle.enemy_ship_class, e_hdg, Color(0.46, 0.33, 0.22), ship_cell_size, 1.0)
+		_draw_ship_silhouette(enemy_center, ship_battle.enemy_ship_class, e_hdg, Color(0.46, 0.33, 0.22), ship_cell_size, 1.0, er, es)
 		draw_string(ThemeDB.fallback_font, player_center + Vector2(-64, 92), "Your %s" % ship_battle.player_ship_class, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
 		draw_string(ThemeDB.fallback_font, enemy_center + Vector2(-74, 92), "Enemy %s" % ship_battle.enemy_ship_class, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
 
@@ -457,9 +456,11 @@ func _draw() -> void:
 		draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 84.0), turn_cost_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 18)
 		var mp_text := "Movement Points - You: %d | Enemy: %d" % [ship_battle.player_move_points, ship_battle.enemy_move_points]
 		draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 108.0), mp_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 18)
-		var gun_reload_text := "Gun reload — You: %s | Enemy: %s" % [
-			"ready" if ship_battle.player_cannon_reload_turns_remaining <= 0 else "%d rd" % ship_battle.player_cannon_reload_turns_remaining,
-			"ready" if ship_battle.enemy_cannon_reload_turns_remaining <= 0 else "%d rd" % ship_battle.enemy_cannon_reload_turns_remaining
+		var gun_reload_text := "Guns P/S — You: %s/%s  Enemy: %s/%s" % [
+			_gun_reload_hud_token(ship_battle.get_player_port_cannon_reload_turns_remaining()),
+			_gun_reload_hud_token(ship_battle.get_player_starboard_cannon_reload_turns_remaining()),
+			_gun_reload_hud_token(ship_battle.get_enemy_port_cannon_reload_turns_remaining()),
+			_gun_reload_hud_token(ship_battle.get_enemy_starboard_cannon_reload_turns_remaining())
 		]
 		draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 130.0), gun_reload_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 16)
 		var forward_text := "Sails: [/] cycle | Grid: %.1f ft | Fwd/step: %.2f | Max reach ~%d sq (this sail)" % [
@@ -1552,7 +1553,7 @@ func _draw_ship_cell_path_polyline(
 	var rr: int = ship_battle.combat_rows
 	for step in path:
 		var pos: Vector2 = step["pos"] as Vector2
-		var n := Vector2(pos.x / float(max(1, cc - 1)), pos.y / float(max(1, rr - 1)))
+		var n := _naval_combat_cell_pos_to_screen_norm(pos, cc, rr)
 		pts.append(_combat_to_screen(n, grid_rect, cc, rr, view_origin, view_cols, view_rows))
 	draw_polyline(pts, color, width)
 
@@ -1571,13 +1572,36 @@ func _draw_ship_footprint_cells(
 		draw_rect(rect, color, true)
 		draw_rect(rect, Color(color.r, color.g, color.b, minf(0.85, color.a + 0.28)), false, 1.0)
 
+func _gun_reload_hud_token(turns_remaining: int) -> String:
+	return "●" if turns_remaining <= 0 else str(turns_remaining)
+
+
+func _gun_port_color_from_reload(reload_turns: int, alpha_scale: float) -> Color:
+	var a: float = clampf(alpha_scale, 0.0, 1.0)
+	if reload_turns <= 0:
+		return Color(0.32, 0.78, 0.55, 0.88 * a)
+	var cap: float = float(maxi(1, ship_battle.get_cannon_reload_max_rounds()))
+	var t: float = clampf(float(reload_turns) / cap, 0.12, 1.0)
+	return Color(0.92, 0.34 + 0.22 * t, 0.2, (0.48 + 0.44 * t) * a)
+
+
+func _draw_player_battery_cooldown_pips(volley_rect: Rect2) -> void:
+	var y: float = volley_rect.position.y + 7.0
+	var x_right: float = volley_rect.position.x + volley_rect.size.x - 18.0
+	var rp: int = ship_battle.get_player_port_cannon_reload_turns_remaining()
+	var rs: int = ship_battle.get_player_starboard_cannon_reload_turns_remaining()
+	draw_circle(Vector2(x_right - 12.0, y + 3.0), 3.0, _gun_port_color_from_reload(rp, 1.0))
+	draw_circle(Vector2(x_right, y + 3.0), 3.0, _gun_port_color_from_reload(rs, 1.0))
+
 func _draw_ship_silhouette(
 	center: Vector2,
 	ship_class: String,
 	heading_deg: float,
 	hull_color: Color,
 	cell_size: float = 0.0,
-	alpha_mult: float = 1.0
+	alpha_mult: float = 1.0,
+	port_reload_turns: int = -1,
+	starboard_reload_turns: int = -1
 ) -> void:
 	var length_cells: float = float(ship_battle.get_ship_length_cells(ship_class))
 	var width_cells: float = float(ship_battle.get_ship_width_cells(ship_class))
@@ -1644,29 +1668,146 @@ func _draw_ship_silhouette(
 		draw_colored_polygon(fore_sail, sail_color)
 		draw_colored_polygon(main_sail, sail_color)
 
-	# Gun ports hint broadside strength by ship class.
+	# Gun ports: port (local -beam) vs starboard (+beam); color shows per-battery cooldown.
 	var gun_count: int = int(round(4.0 + draw_scale * 5.0))
 	for i in range(gun_count):
 		var t: float = float(i + 1) / float(gun_count + 1)
 		var px: float = lerpf(-half_length * 0.7, half_length * 0.65, t)
-		draw_circle(basis * Vector2(px, half_beam * 0.48), 2.5, Color(0.1, 0.1, 0.1, 0.55 + 0.45 * am))
+		if port_reload_turns < 0 or starboard_reload_turns < 0:
+			draw_circle(basis * Vector2(px, half_beam * 0.48), 2.5, Color(0.1, 0.1, 0.1, 0.55 + 0.45 * am))
+		else:
+			var c_port: Color = _gun_port_color_from_reload(port_reload_turns, am)
+			var c_stbd: Color = _gun_port_color_from_reload(starboard_reload_turns, am)
+			draw_circle(basis * Vector2(px, -half_beam * 0.46), 2.35, c_port)
+			draw_circle(basis * Vector2(px, half_beam * 0.46), 2.35, c_stbd)
+
+func _ship_combat_merge_cells_dict(into: Dictionary, cells: Array[Vector2i]) -> void:
+	for c in cells:
+		into[c] = true
+
+func _ship_combat_cells_from_pose_path(path: Array[Dictionary]) -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	for step in path:
+		if not (step is Dictionary):
+			continue
+		var pos: Vector2 = step.get("pos", Vector2.ZERO) as Vector2
+		out.append(Vector2i(int(round(pos.x)), int(round(pos.y))))
+	return out
+
+func _ship_combat_player_move_grid_cells() -> Array[Vector2i]:
+	var seen: Dictionary = {}
+	if ship_battle.phase == ShipBattle.Phase.PLANNING:
+		var preview: Dictionary = ship_battle.get_player_movement_preview()
+		var rc: Variant = preview.get("reachable_cells", [])
+		if rc is Array:
+			for cv in rc:
+				if cv is Vector2i:
+					seen[cv] = true
+		var tc: Variant = preview.get("terminal_cells", [])
+		if tc is Array:
+			for cv in tc:
+				if cv is Vector2i:
+					seen[cv] = true
+		var fc: Variant = preview.get("forward_cells", [])
+		if fc is Array:
+			for cv in fc:
+				if cv is Vector2i:
+					seen[cv] = true
+		_ship_combat_merge_cells_dict(seen, ship_battle.get_player_occupied_cells())
+		if ship_battle.is_player_movement_plotted():
+			_ship_combat_merge_cells_dict(seen, ship_battle.get_player_planned_occupied_cells())
+	elif ship_battle.phase == ShipBattle.Phase.MOVE_ANIM:
+		_ship_combat_merge_cells_dict(seen, _ship_combat_cells_from_pose_path(ship_battle.player_round_path))
+		_ship_combat_merge_cells_dict(seen, _ship_combat_cells_from_pose_path(ship_battle.enemy_round_path))
+		_ship_combat_merge_cells_dict(
+			seen,
+			ship_battle.get_player_occupied_cells_for_pose(
+				ship_battle.get_player_display_cell_pos(),
+				ship_battle.get_player_display_heading_deg()
+			)
+		)
+		_ship_combat_merge_cells_dict(
+			seen,
+			ship_battle.get_enemy_occupied_cells_for_pose(
+				ship_battle.get_enemy_display_cell_pos(),
+				ship_battle.get_enemy_display_heading_deg()
+			)
+		)
+	var out: Array[Vector2i] = []
+	for k in seen.keys():
+		if k is Vector2i:
+			out.append(k)
+	return out
+
+func _ship_combat_camera_anchor_cells() -> Array[Vector2i]:
+	var seen: Dictionary = {}
+	var pp: Vector2 = ship_battle.get_player_display_cell_pos()
+	var ph: float = ship_battle.get_player_display_heading_deg()
+	var ep: Vector2 = ship_battle.get_enemy_display_cell_pos()
+	var eh: float = ship_battle.get_enemy_display_heading_deg()
+	_ship_combat_merge_cells_dict(seen, ship_battle.get_player_occupied_cells_for_pose(pp, ph))
+	_ship_combat_merge_cells_dict(seen, ship_battle.get_enemy_occupied_cells_for_pose(ep, eh))
+	if ship_battle.phase == ShipBattle.Phase.PLANNING and ship_battle.is_player_movement_plotted():
+		_ship_combat_merge_cells_dict(seen, ship_battle.get_player_planned_occupied_cells())
+	var out: Array[Vector2i] = []
+	for k in seen.keys():
+		if k is Vector2i:
+			out.append(k)
+	return out
 
 func _ship_nav_view_origin(view_cols: int, view_rows: int) -> Vector2:
-	var pp: Vector2 = ship_battle.get_player_display_cell_pos()
-	var ep: Vector2 = ship_battle.get_enemy_display_cell_pos()
-	var mid: Vector2 = (pp + ep) * 0.5
 	var max_ox: float = maxf(0.0, float(ship_battle.combat_cols - view_cols))
 	var max_oy: float = maxf(0.0, float(ship_battle.combat_rows - view_rows))
-	var ox: float = clampf(mid.x - float(view_cols) * 0.5, 0.0, max_ox)
-	var oy: float = clampf(mid.y - float(view_rows) * 0.5, 0.0, max_oy)
-	return Vector2(ox, oy)
+	var anchor_cells: Array[Vector2i] = _ship_combat_camera_anchor_cells()
+	if anchor_cells.size() >= 1:
+		var min_x: int = anchor_cells[0].x
+		var max_x: int = anchor_cells[0].x
+		var min_y: int = anchor_cells[0].y
+		var max_y: int = anchor_cells[0].y
+		for c in anchor_cells:
+			min_x = mini(min_x, c.x)
+			max_x = maxi(max_x, c.x)
+			min_y = mini(min_y, c.y)
+			max_y = maxi(max_y, c.y)
+		var pad: int = SHIP_COMBAT_FRAMING_CELL_PAD
+		min_x = maxi(0, min_x - pad)
+		min_y = maxi(0, min_y - pad)
+		max_x = mini(ship_battle.combat_cols - 1, max_x + pad)
+		max_y = mini(ship_battle.combat_rows - 1, max_y + pad)
+		var span_x: int = max_x - min_x + 1
+		var span_y: int = max_y - min_y + 1
+		var ox: float
+		var oy: float
+		var pc: Vector2 = ship_battle.get_player_display_cell_pos()
+		var ec: Vector2 = ship_battle.get_enemy_display_cell_pos()
+		if span_x <= view_cols:
+			ox = clampf(float(min_x + max_x) * 0.5 - float(view_cols) * 0.5, 0.0, max_ox)
+		else:
+			ox = clampf((pc.x + ec.x) * 0.5 - float(view_cols) * 0.5, 0.0, max_ox)
+		if span_y <= view_rows:
+			oy = clampf(float(min_y + max_y) * 0.5 - float(view_rows) * 0.5, 0.0, max_oy)
+		else:
+			oy = clampf((pc.y + ec.y) * 0.5 - float(view_rows) * 0.5, 0.0, max_oy)
+		return Vector2(ox, oy)
+	var pp: Vector2 = ship_battle.get_player_display_cell_pos()
+	var ep: Vector2 = ship_battle.get_enemy_display_cell_pos()
+	var mid2: Vector2 = (pp + ep) * 0.5
+	var ox2: float = clampf(mid2.x - float(view_cols) * 0.5, 0.0, max_ox)
+	var oy2: float = clampf(mid2.y - float(view_rows) * 0.5, 0.0, max_oy)
+	return Vector2(ox2, oy2)
+
+## ShipBattle cell positions are hull centers at (i+0.5, j+0.5) in combat cell space.
+func _naval_combat_cell_pos_to_screen_norm(cell_pos: Vector2, cols: int, rows: int) -> Vector2:
+	var dx: float = float(max(1, cols - 1))
+	var dy: float = float(max(1, rows - 1))
+	return Vector2((cell_pos.x - 0.5) / dx, (cell_pos.y - 0.5) / dy)
 
 func _naval_cell_center_from_float(cell_pos: Vector2, grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> Vector2:
 	var cell_w: float = grid_rect.size.x / float(max(1, view_cols))
 	var cell_h: float = grid_rect.size.y / float(max(1, view_rows))
 	var rx: float = cell_pos.x - view_origin.x
 	var ry: float = cell_pos.y - view_origin.y
-	return Vector2(grid_rect.position.x + (rx + 0.5) * cell_w, grid_rect.position.y + (ry + 0.5) * cell_h)
+	return Vector2(grid_rect.position.x + rx * cell_w, grid_rect.position.y + ry * cell_h)
 
 func _naval_cell_rect(grid_rect: Rect2, cell: Vector2i, view_origin: Vector2, view_cols: int, view_rows: int) -> Rect2:
 	var cell_w: float = grid_rect.size.x / float(max(1, view_cols))
@@ -1683,8 +1824,8 @@ func _combat_to_screen(
 ) -> Vector2:
 	if cols <= 0 or rows <= 0:
 		return combat_rect.position + Vector2(point.x * combat_rect.size.x, point.y * combat_rect.size.y)
-	var gx: float = clampf(point.x, 0.0, 1.0) * float(max(1, cols - 1))
-	var gy: float = clampf(point.y, 0.0, 1.0) * float(max(1, rows - 1))
+	var gx: float = clampf(point.x, 0.0, 1.0) * float(max(1, cols - 1)) + 0.5
+	var gy: float = clampf(point.y, 0.0, 1.0) * float(max(1, rows - 1)) + 0.5
 	return _naval_cell_center_from_float(Vector2(gx, gy), combat_rect, view_origin, view_cols, view_rows)
 
 func _naval_grid_rect(arena_rect: Rect2, cols: int, rows: int) -> Rect2:
@@ -1728,22 +1869,34 @@ func _ship_combat_view_rect(base_grid_rect: Rect2) -> Rect2:
 	var zoomed_size: Vector2 = base_grid_rect.size * ship_combat_zoom
 	return Rect2(center - zoomed_size * 0.5, zoomed_size)
 
-func _draw_naval_grid(combat_rect: Rect2, cols: int, rows: int) -> void:
-	if cols <= 1 or rows <= 1:
-		return
+func _draw_naval_movement_water_background(combat_rect: Rect2) -> void:
 	draw_rect(combat_rect, Color(0.08, 0.16, 0.25, 0.24), true)
-	var cell_w: float = combat_rect.size.x / float(cols)
-	var cell_h: float = combat_rect.size.y / float(rows)
-	for y in range(rows):
-		for x in range(cols):
-			var cell_rect := Rect2(
-				Vector2(combat_rect.position.x + float(x) * cell_w, combat_rect.position.y + float(y) * cell_h),
-				Vector2(cell_w, cell_h)
-			)
-			var major: bool = x % 4 == 0 or y % 4 == 0
-			var border_color: Color = Color(0.82, 0.94, 1.0, 0.26) if major else Color(0.72, 0.86, 0.95, 0.17)
-			draw_rect(cell_rect, border_color, false, 1.0)
-	draw_rect(combat_rect, Color(0.9, 0.97, 1.0, 0.35), false, 2.0)
+
+func _draw_naval_reachable_cell_grid(
+	grid_rect: Rect2,
+	view_origin: Vector2,
+	view_cols: int,
+	view_rows: int,
+	cells: Array[Vector2i]
+) -> void:
+	if view_cols <= 1 or view_rows <= 1:
+		return
+	var cell_w: float = grid_rect.size.x / float(max(1, view_cols))
+	var cell_h: float = grid_rect.size.y / float(max(1, view_rows))
+	for c in cells:
+		if c.x < int(view_origin.x) or c.y < int(view_origin.y):
+			continue
+		if c.x >= int(view_origin.x) + view_cols or c.y >= int(view_origin.y) + view_rows:
+			continue
+		var cell_rect: Rect2 = _naval_cell_rect(grid_rect, c, view_origin, view_cols, view_rows)
+		if not cell_rect.intersects(grid_rect.grow(1.0)):
+			continue
+		var major: bool = c.x % 4 == 0 or c.y % 4 == 0
+		var border_color: Color = Color(0.82, 0.94, 1.0, 0.26) if major else Color(0.72, 0.86, 0.95, 0.17)
+		draw_rect(cell_rect, border_color, false, 1.0)
+	var border_rect: Rect2 = Rect2(grid_rect.position, Vector2(float(view_cols) * cell_w, float(view_rows) * cell_h))
+	if border_rect.intersects(grid_rect.grow(1.0)):
+		draw_rect(border_rect, Color(0.9, 0.97, 1.0, 0.35), false, 2.0)
 
 func _draw_ship_hazards(grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> void:
 	var hazards: Array[Vector2i] = ship_battle.get_hazard_cells()
@@ -1790,6 +1943,7 @@ func _draw_ship_action_panel(panel_rect: Rect2) -> void:
 		ship_battle.player_plan_volley_when_in_range,
 		true
 	)
+	_draw_player_battery_cooldown_pips(volley_rect)
 	_draw_ship_action_button(show_guns_rect, "Gun range", ship_combat_show_gun_range, true)
 	_draw_ship_action_button(
 		board_rect,
@@ -1995,13 +2149,21 @@ func _draw_ship_movement_preview(grid_rect: Rect2, view_origin: Vector2, view_co
 			continue
 		var r: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
 		draw_rect(r, Color(0.34, 0.7, 0.95, 0.12), true)
-		envelope_points.append(_naval_cell_center_from_float(Vector2(cell), grid_rect, view_origin, view_cols, view_rows))
+		envelope_points.append(
+			_naval_cell_center_from_float(
+				Vector2(float(cell.x) + 0.5, float(cell.y) + 0.5), grid_rect, view_origin, view_cols, view_rows
+			)
+		)
 
 	for cell in terminal_cells:
-		var tr: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
-		draw_rect(tr, Color(0.98, 0.86, 0.35, 0.28), true)
-		draw_rect(tr, Color(1.0, 0.92, 0.45, 0.92), false, 2.0)
-		envelope_points.append(_naval_cell_center_from_float(Vector2(cell), grid_rect, view_origin, view_cols, view_rows))
+		var term_rect: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
+		draw_rect(term_rect, Color(0.98, 0.86, 0.35, 0.28), true)
+		draw_rect(term_rect, Color(1.0, 0.92, 0.45, 0.92), false, 2.0)
+		envelope_points.append(
+			_naval_cell_center_from_float(
+				Vector2(float(cell.x) + 0.5, float(cell.y) + 0.5), grid_rect, view_origin, view_cols, view_rows
+			)
+		)
 
 	if forward is Array:
 		for cell_variant in forward:
@@ -2039,15 +2201,65 @@ func _draw_ship_gun_range_overlay(grid_rect: Rect2, view_origin: Vector2, view_c
 		return
 	if ship_battle.phase != ShipBattle.Phase.PLANNING:
 		return
-	var cells: Array[Vector2i] = ship_battle.get_player_gun_range_preview_cells()
-	for cell in cells:
+	var cell_w: float = grid_rect.size.x / float(max(1, view_cols))
+	var cell_h: float = grid_rect.size.y / float(max(1, view_rows))
+	var cell_px: float = (cell_w + cell_h) * 0.5
+	var yd_per_cell: float = ship_battle.get_combat_cell_yards()
+	var plan_norm: Vector2 = _naval_combat_cell_pos_to_screen_norm(
+		ship_battle.player_plan_end_pos, ship_battle.combat_cols, ship_battle.combat_rows
+	)
+	var ship_center: Vector2 = _combat_to_screen(
+		plan_norm, grid_rect, ship_battle.combat_cols, ship_battle.combat_rows, view_origin, view_cols, view_rows
+	)
+	var overlay: Array = ship_battle.get_player_gun_range_overlay_cells()
+	for e in overlay:
+		if not (e is Dictionary):
+			continue
+		var d: Dictionary = e
+		var cell: Vector2i = d["cell"] as Vector2i
+		var band: int = int(d.get("band", 0))
+		var fill: Color = Color(0.55, 0.38, 0.92, 0.07)
+		match band:
+			3:
+				fill = Color(0.32, 0.88, 0.52, 0.14)
+			2:
+				fill = Color(0.88, 0.82, 0.38, 0.12)
+			1:
+				fill = Color(0.92, 0.58, 0.32, 0.10)
 		var rect: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
-		draw_rect(rect, Color(0.95, 0.55, 0.35, 0.12), true)
+		draw_rect(rect, fill, true)
+	var ring_cols: Array[Color] = [
+		Color(0.45, 0.95, 0.62, 0.55),
+		Color(0.95, 0.88, 0.42, 0.5),
+		Color(0.98, 0.62, 0.35, 0.48)
+	]
+	var ring_thresholds: Array[float] = [0.75, 0.50, 0.25]
+	for ri in range(ring_thresholds.size()):
+		var ring_y: float = ship_battle.get_player_cannon_accuracy_ring_yards(ring_thresholds[ri])
+		if ring_y < 12.0:
+			continue
+		var rad: float = (ring_y / yd_per_cell) * cell_px
+		draw_arc(ship_center, rad, 0.0, TAU, 80, ring_cols[ri], 1.75, true)
+	var preview_cells: Array[Vector2i] = ship_battle.get_player_gun_range_preview_cells()
 	var enemy_rect: Rect2 = _naval_cell_rect(grid_rect, ship_battle.enemy_cell, view_origin, view_cols, view_rows)
-	if cells.has(ship_battle.enemy_cell):
+	if preview_cells.has(ship_battle.enemy_cell):
 		draw_rect(enemy_rect, Color(1.0, 0.45, 0.28, 0.22), true)
 		draw_rect(enemy_rect, Color(1.0, 0.82, 0.65, 0.75), false, 2.0)
 		draw_string(ThemeDB.fallback_font, enemy_rect.position + Vector2(4.0, 14.0), "IN ARC", HORIZONTAL_ALIGNMENT_LEFT, -1, 11)
+	var leg: String = "Max %.0f yd · per-gun hit chance (≈%.0f yd/cell): " % [ship_battle.get_cannon_max_effective_range_yards(), yd_per_cell]
+	leg += "≥75%%  "
+	leg += "50–75%%  "
+	leg += "25–50%%  "
+	leg += "<25%%"
+	draw_string(
+		ThemeDB.fallback_font,
+		grid_rect.position + Vector2(8.0, grid_rect.size.y - 22.0),
+		leg,
+		HORIZONTAL_ALIGNMENT_LEFT,
+		-1,
+		12,
+		Color(0.88, 0.93, 1.0, 0.82)
+	)
 
 func _draw_action_destinations(grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> void:
 	if ship_battle.phase != ShipBattle.Phase.PLANNING:
@@ -2071,10 +2283,7 @@ func _draw_action_marker(
 		return
 	var target_pos: Vector2 = target_pos_variant
 	var center: Vector2 = _combat_to_screen(
-		Vector2(
-			target_pos.x / float(max(1, ship_battle.combat_cols - 1)),
-			target_pos.y / float(max(1, ship_battle.combat_rows - 1))
-		),
+		_naval_combat_cell_pos_to_screen_norm(target_pos, ship_battle.combat_cols, ship_battle.combat_rows),
 		grid_rect,
 		ship_battle.combat_cols,
 		ship_battle.combat_rows,
@@ -2275,8 +2484,10 @@ func _handle_ship_combat_click(screen_pos: Vector2) -> void:
 	var col: int = clampi(int(floor(col_f)), 0, ship_battle.combat_cols - 1)
 	var row: int = clampi(int(floor(row_f)), 0, ship_battle.combat_rows - 1)
 	var clicked: Vector2i = Vector2i(col, row)
-	if ship_combat_selected_action == SHIP_ACTION_MOVE and ship_battle.can_player_move_to_cell(clicked):
+	if ship_battle.can_player_move_to_cell(clicked):
+		ship_combat_selected_action = SHIP_ACTION_MOVE
 		ship_move_selected_cell = clicked
+		_confirm_ship_move_selection()
 	elif ship_combat_selected_action == SHIP_ACTION_DISENGAGE and ship_battle.can_player_disengage():
 		ship_battle.player_disengage()
 

@@ -7,7 +7,14 @@ signal battle_finished(player_won: bool, disengaged: bool)
 
 enum Phase {
 	PLANNING,
-	RESOLVED
+	RESOLVED,
+	MOVE_ANIM
+}
+
+enum SailSetting {
+	SLOW,
+	BATTLE,
+	FULL
 }
 
 var phase: Phase = Phase.PLANNING
@@ -38,6 +45,9 @@ var enemy_move_points: int = 0
 var player_navigator_skill: int = 2
 var enemy_navigator_skill: int = 2
 var enemy_behavior: String = "engage"
+var player_sail_setting: SailSetting = SailSetting.BATTLE
+var enemy_sail_setting: SailSetting = SailSetting.BATTLE
+var player_movement_plotted: bool = false
 var player_plan_end_pos: Vector2 = Vector2.ZERO
 var player_plan_end_heading: float = 0.0
 var player_plan_volley_when_in_range: bool = true
@@ -53,7 +63,20 @@ var enemy_hull_battle_start: int = 16
 var player_crew_battle_start: int = 24
 var enemy_crew_battle_start: int = 24
 var _completed_wego_rounds: int = 0
+## Full terminal state chosen for the player (cell, mp, pos, heading); used for path playback.
+var player_plan_terminal: Dictionary = {}
+var enemy_plan_terminal: Dictionary = {}
+var player_plan_preview_path: Array[Dictionary] = []
+var player_round_path: Array[Dictionary] = []
+var enemy_round_path: Array[Dictionary] = []
+var _move_anim_elapsed: float = 0.0
+const MOVE_ANIM_DURATION_SEC := 1.35
 var hazard_cells: Dictionary = {}
+const COMBAT_GRID_FEET := 12.5
+## Straight run at FULL sail should cover this many hull lengths (grid cells along track).
+const STRAIGHT_HULL_LENGTHS_AT_FULL := 3.0
+const COMBAT_MOVE_SCALE_MIN := 0.35
+const COMBAT_MOVE_SCALE_MAX := 1.95
 const TURN_STEP_DEG := 15.0
 const DISENGAGE_MIN_CELL_DIST := 26.0
 const CANNON_RELOAD_BASE_ROUNDS := 3
@@ -81,14 +104,17 @@ func start_battle(context: Dictionary = {}) -> void:
 	_completed_wego_rounds = 0
 	player_has_boarding_advantage = false
 	enemy_has_boarding_advantage = false
-	player_cell_pos = Vector2(32.0, 26.0)
-	enemy_cell_pos = Vector2(54.0, 22.0)
-	player_cell = Vector2i(32, 26)
-	enemy_cell = Vector2i(54, 22)
 	player_heading_deg = _vector_to_bearing_deg(context.get("player_heading", Vector2.RIGHT))
 	enemy_heading_deg = _vector_to_bearing_deg(context.get("enemy_heading", Vector2.LEFT))
 	player_heading_idx = _bearing_to_heading_idx(player_heading_deg)
 	enemy_heading_idx = _bearing_to_heading_idx(enemy_heading_deg)
+	if bool(context.get("skip_opening_spacing", false)):
+		player_cell_pos = Vector2(float(context.get("player_cell_x", 32.0)), float(context.get("player_cell_y", 26.0)))
+		enemy_cell_pos = Vector2(float(context.get("enemy_cell_x", 54.0)), float(context.get("enemy_cell_y", 22.0)))
+	else:
+		_layout_opening_positions_at_cannon_range()
+	player_cell = Vector2i(int(round(player_cell_pos.x)), int(round(player_cell_pos.y)))
+	enemy_cell = Vector2i(int(round(enemy_cell_pos.x)), int(round(enemy_cell_pos.y)))
 	player_navigator_skill = clampi(int(context.get("player_navigator_skill", 2)), 0, 5)
 	enemy_navigator_skill = clampi(int(context.get("enemy_navigator_skill", 2)), 0, 5)
 	var wind_variant: Variant = context.get("wind", {"direction_deg": 90.0, "speed_m_s": 6.0})
@@ -100,10 +126,12 @@ func start_battle(context: Dictionary = {}) -> void:
 	enemy_cannon_reload_turns_remaining = 0
 	_generate_hazards(bool(context.get("near_land", false)))
 	_sync_pose_from_positions()
+	player_sail_setting = SailSetting.BATTLE
+	enemy_sail_setting = SailSetting.BATTLE
 	_begin_planning_round()
 	emit_signal(
 		"battle_updated",
-		"Enemy %s sighted. You command a %s. WEGO: plan movement, optional Volley if in range, Show gun range to preview arcs, grapple order, then Commit. F toggles gun-range overlay. X breaks off when clear." % [
+		"Enemy %s sighted. You command a %s. WEGO: set sails (Slow/Battle/Full), pick a gold endpoint to spend all movement, then Commit. [/] cycles sails. Volley/board optional. F gun range. X break off when clear." % [
 			enemy_ship_class,
 			player_ship_class
 		]
@@ -112,34 +140,59 @@ func start_battle(context: Dictionary = {}) -> void:
 func set_player_planned_move_cell(target_cell: Vector2i) -> bool:
 	if phase != Phase.PLANNING:
 		return false
+	var sail_mul: float = _sail_forward_multiplier(player_sail_setting)
 	var built: Dictionary = _build_movement_states(
 		player_cell_pos,
 		player_heading_deg,
 		player_move_points,
 		player_ship_class,
 		enemy_cell_pos,
-		player_cell
+		enemy_heading_deg,
+		enemy_ship_class,
+		player_cell,
+		sail_mul
 	)
-	var states: Array = built["states"]
-	var best_index: int = -1
-	var best_mp: int = -1
-	for i in range(states.size()):
-		var s_variant: Variant = states[i]
-		if not (s_variant is Dictionary):
+	var terminals: Array[Dictionary] = _collect_terminal_states(
+		built["states"],
+		player_ship_class,
+		enemy_cell_pos,
+		enemy_heading_deg,
+		enemy_ship_class,
+		sail_mul,
+		float(built["move_scale"])
+	)
+	var best: Dictionary = {}
+	for s in terminals:
+		if s["cell"] != target_cell:
 			continue
-		var s: Dictionary = s_variant
-		var cell: Vector2i = s["cell"]
-		if cell != target_cell:
-			continue
-		var mp: int = int(s["mp"])
-		if mp > best_mp:
-			best_mp = mp
-			best_index = i
-	if best_index < 0:
+		if best.is_empty() or _better_player_terminal_for_cell(s, best):
+			best = s
+	if best.is_empty():
 		return false
-	var selected: Dictionary = states[best_index]
-	player_plan_end_pos = selected["pos"]
-	player_plan_end_heading = float(selected["heading_deg"])
+	player_plan_end_pos = best["pos"]
+	player_plan_end_heading = float(best["heading_deg"])
+	player_movement_plotted = true
+	player_plan_terminal = best.duplicate(true)
+	var sail_mul_plot: float = _sail_forward_multiplier(player_sail_setting)
+	player_plan_preview_path = _reconstruct_path_to_terminal(
+		player_cell_pos,
+		player_heading_deg,
+		player_move_points,
+		player_ship_class,
+		enemy_cell_pos,
+		enemy_heading_deg,
+		enemy_ship_class,
+		player_cell,
+		sail_mul_plot,
+		player_plan_terminal
+	)
+	_ensure_path_has_endpoints(
+		player_plan_preview_path,
+		player_cell_pos,
+		player_heading_deg,
+		player_plan_end_pos,
+		player_plan_end_heading
+	)
 	return true
 
 func player_toggle_volley_when_in_range() -> void:
@@ -202,8 +255,17 @@ func player_commit_orders() -> void:
 	if get_ship_separation() >= DISENGAGE_MIN_CELL_DIST and enemy_behavior == "escape":
 		_finish_mutual_disengage(false)
 		return
+	if not can_player_commit_round():
+		emit_signal(
+			"battle_updated",
+			"Choose sail speed, then pick a gold endpoint that spends your full movement (or a forced stop). Commit is locked until then."
+		)
+		return
 	_build_enemy_plan()
-	_resolve_simultaneous_round()
+	_cache_round_anim_paths()
+	phase = Phase.MOVE_ANIM
+	_move_anim_elapsed = 0.0
+	emit_signal("battle_updated", "Helm and sheets: execute ordered movement.")
 
 func _score_enemy_destination_cell(cell: Vector2i, player_goal: Vector2) -> float:
 	var dx: float = float(cell.x) - player_goal.x
@@ -216,57 +278,69 @@ func _score_enemy_destination_cell(cell: Vector2i, player_goal: Vector2) -> floa
 func _build_enemy_plan() -> void:
 	# Blind planning: enemy only sees your current pose, not your plotted move or aim.
 	var player_observed: Vector2 = player_cell_pos
+	var enemy_sail_mul: float = _sail_forward_multiplier(enemy_sail_setting)
 	var built: Dictionary = _build_movement_states(
 		enemy_cell_pos,
 		enemy_heading_deg,
 		enemy_move_points,
 		enemy_ship_class,
 		player_observed,
-		enemy_cell
+		player_heading_deg,
+		player_ship_class,
+		enemy_cell,
+		enemy_sail_mul
 	)
-	var reachable: Dictionary = built["reachable"]
 	var states: Array = built["states"]
+	var terminals: Array[Dictionary] = _collect_terminal_states(
+		states,
+		enemy_ship_class,
+		player_observed,
+		player_heading_deg,
+		player_ship_class,
+		enemy_sail_mul,
+		float(built["move_scale"])
+	)
 	var player_cell_now: Vector2i = player_cell
-	var best_cell: Vector2i = enemy_cell
+	var best_terminal: Dictionary = {}
 	var best_score: float = -INF
-	for c in reachable.keys():
-		if not (c is Vector2i):
-			continue
-		var cell: Vector2i = c
+	for s in terminals:
+		var cell: Vector2i = s["cell"]
 		if cell == player_cell_now:
 			continue
 		var sc: float = _score_enemy_destination_cell(cell, player_observed)
 		if sc > best_score:
 			best_score = sc
-			best_cell = cell
-	var best_index: int = -1
-	var best_mp: int = -1
-	for i in range(states.size()):
-		var s_variant: Variant = states[i]
-		if not (s_variant is Dictionary):
-			continue
-		var s: Dictionary = s_variant
-		if s["cell"] != best_cell:
-			continue
-		var mp: int = int(s["mp"])
-		if mp > best_mp:
-			best_mp = mp
-			best_index = i
-	if best_index < 0:
+			best_terminal = s
+		elif absf(sc - best_score) <= 0.0001 and not best_terminal.is_empty():
+			if int(s["mp"]) < int(best_terminal["mp"]):
+				best_terminal = s
+	if best_terminal.is_empty():
 		enemy_plan_end_pos = enemy_cell_pos
 		enemy_plan_end_heading = enemy_heading_deg
+		enemy_plan_terminal = {
+			"pos": enemy_cell_pos,
+			"heading_deg": enemy_heading_deg,
+			"mp": enemy_move_points,
+			"cell": enemy_cell
+		}
 	else:
-		var sel: Dictionary = states[best_index]
-		enemy_plan_end_pos = sel["pos"]
-		enemy_plan_end_heading = float(sel["heading_deg"])
-	var enemy_end_cell: Vector2i = Vector2i(int(round(enemy_plan_end_pos.x)), int(round(enemy_plan_end_pos.y)))
+		enemy_plan_end_pos = best_terminal["pos"]
+		enemy_plan_end_heading = float(best_terminal["heading_deg"])
+		enemy_plan_terminal = best_terminal.duplicate(true)
 	if enemy_behavior == "escape":
 		enemy_plan_volley_when_in_range = false
 		enemy_plan_board = false
 	else:
 		enemy_plan_volley_when_in_range = enemy_cannon_reload_turns_remaining <= 0
 		enemy_plan_board = (
-			_grid_chebyshev_distance(enemy_end_cell, player_cell_now) <= 1
+			_ship_footprint_distance(
+				enemy_plan_end_pos,
+				enemy_plan_end_heading,
+				enemy_ship_class,
+				player_cell_pos,
+				player_heading_deg,
+				player_ship_class
+			) <= 1
 			and randf() < 0.38
 			and enemy_hull > 4
 		)
@@ -337,7 +411,7 @@ func _resolve_volley_orders_if_in_range(
 		emit_signal("battle_updated", "Enemy %s strikes for %d hull damage.%s" % [shot_type, damage, rake_text])
 	return true
 
-func _resolve_simultaneous_round() -> void:
+func _snap_ship_poses_to_planned_round() -> void:
 	var e_pos_save: Vector2 = enemy_cell_pos
 	var e_h_save: float = enemy_heading_deg
 	player_cell_pos = player_plan_end_pos
@@ -356,6 +430,8 @@ func _resolve_simultaneous_round() -> void:
 		enemy_heading_idx = _bearing_to_heading_idx(enemy_heading_deg)
 		_sync_pose_from_positions()
 		emit_signal("battle_updated", "Both ordered the same sea room—you hold it; the enemy backs water.")
+
+func _resolve_planned_round_effects() -> void:
 	if _check_collision_with_hazard(player_cell):
 		_advance_cannon_reload_after_round(false, false)
 		return
@@ -382,7 +458,14 @@ func _resolve_simultaneous_round() -> void:
 		if phase != Phase.RESOLVED:
 			_begin_planning_round()
 		return
-	if player_plan_board and _grid_chebyshev_distance(player_cell, enemy_cell) <= 1:
+	if player_plan_board and _ship_footprint_distance(
+		player_cell_pos,
+		player_heading_deg,
+		player_ship_class,
+		enemy_cell_pos,
+		enemy_heading_deg,
+		enemy_ship_class
+	) <= 1:
 		var chance := 0.38
 		var crew_ratio: float = float(player_crew) / float(max(1, enemy_crew))
 		chance += clampf((crew_ratio - 1.0) * 0.2, -0.12, 0.2)
@@ -397,7 +480,14 @@ func _resolve_simultaneous_round() -> void:
 			return
 		emit_signal("battle_updated", "Grappling attempt fails; lines part.")
 		enemy_has_boarding_advantage = true
-	elif enemy_plan_board and _grid_chebyshev_distance(enemy_cell, player_cell) <= 1:
+	elif enemy_plan_board and _ship_footprint_distance(
+		enemy_cell_pos,
+		enemy_heading_deg,
+		enemy_ship_class,
+		player_cell_pos,
+		player_heading_deg,
+		player_ship_class
+	) <= 1:
 		var ech := 0.34
 		var crew_ratio_e: float = float(enemy_crew) / float(max(1, player_crew))
 		ech += clampf((crew_ratio_e - 1.0) * 0.2, -0.12, 0.2)
@@ -412,6 +502,250 @@ func _resolve_simultaneous_round() -> void:
 	_advance_cannon_reload_after_round(player_battery_hit, enemy_battery_hit)
 	emit_signal("battle_updated", "Round complete. New orders.")
 	_check_resolution_or_planning()
+
+func _resolve_simultaneous_round() -> void:
+	_snap_ship_poses_to_planned_round()
+	_resolve_planned_round_effects()
+
+func advance_move_animation(delta: float) -> void:
+	if phase != Phase.MOVE_ANIM:
+		return
+	_move_anim_elapsed += delta
+	if _move_anim_elapsed < MOVE_ANIM_DURATION_SEC:
+		return
+	_move_anim_elapsed = 0.0
+	_snap_ship_poses_to_planned_round()
+	_resolve_planned_round_effects()
+	if phase == Phase.MOVE_ANIM:
+		phase = Phase.PLANNING
+
+func get_player_plan_preview_path() -> Array[Dictionary]:
+	return player_plan_preview_path
+
+func get_player_display_cell_pos() -> Vector2:
+	if phase == Phase.MOVE_ANIM:
+		return _sample_anim_path(player_round_path, _move_anim_elapsed / MOVE_ANIM_DURATION_SEC)["pos"] as Vector2
+	return player_cell_pos
+
+func get_enemy_display_cell_pos() -> Vector2:
+	if phase == Phase.MOVE_ANIM:
+		return _sample_anim_path(enemy_round_path, _move_anim_elapsed / MOVE_ANIM_DURATION_SEC)["pos"] as Vector2
+	return enemy_cell_pos
+
+func get_player_display_heading_deg() -> float:
+	if phase == Phase.MOVE_ANIM:
+		return float(_sample_anim_path(player_round_path, _move_anim_elapsed / MOVE_ANIM_DURATION_SEC)["heading_deg"])
+	return player_heading_deg
+
+func get_enemy_display_heading_deg() -> float:
+	if phase == Phase.MOVE_ANIM:
+		return float(_sample_anim_path(enemy_round_path, _move_anim_elapsed / MOVE_ANIM_DURATION_SEC)["heading_deg"])
+	return enemy_heading_deg
+
+func _sample_anim_path(path: Array[Dictionary], u_raw: float) -> Dictionary:
+	var u: float = clampf(u_raw, 0.0, 1.0)
+	if path.is_empty():
+		return {"pos": Vector2.ZERO, "heading_deg": 0.0}
+	var n: int = path.size()
+	if n == 1:
+		return path[0]
+	var f: float = u * float(n - 1)
+	var seg: int = clampi(int(floor(f)), 0, n - 2)
+	var t: float = f - float(seg)
+	var a: Dictionary = path[seg]
+	var b: Dictionary = path[seg + 1]
+	var pa: Vector2 = a["pos"] as Vector2
+	var pb: Vector2 = b["pos"] as Vector2
+	var ha: float = float(a["heading_deg"])
+	var hb: float = float(b["heading_deg"])
+	var pos: Vector2 = pa.lerp(pb, t)
+	var heading_deg: float = rad_to_deg(lerp_angle(deg_to_rad(ha), deg_to_rad(hb), t))
+	return {"pos": pos, "heading_deg": heading_deg}
+
+func _cache_round_anim_paths() -> void:
+	var ps: float = _sail_forward_multiplier(player_sail_setting)
+	player_round_path = _reconstruct_path_to_terminal(
+		player_cell_pos,
+		player_heading_deg,
+		player_move_points,
+		player_ship_class,
+		enemy_cell_pos,
+		enemy_heading_deg,
+		enemy_ship_class,
+		player_cell,
+		ps,
+		player_plan_terminal
+	)
+	var es: float = _sail_forward_multiplier(enemy_sail_setting)
+	enemy_round_path = _reconstruct_path_to_terminal(
+		enemy_cell_pos,
+		enemy_heading_deg,
+		enemy_move_points,
+		enemy_ship_class,
+		player_cell_pos,
+		player_heading_deg,
+		player_ship_class,
+		enemy_cell,
+		es,
+		enemy_plan_terminal
+	)
+	_ensure_path_has_endpoints(
+		player_round_path,
+		player_cell_pos,
+		player_heading_deg,
+		player_plan_end_pos,
+		player_plan_end_heading
+	)
+	_ensure_path_has_endpoints(
+		enemy_round_path,
+		enemy_cell_pos,
+		enemy_heading_deg,
+		enemy_plan_end_pos,
+		enemy_plan_end_heading
+	)
+
+func _ensure_path_has_endpoints(
+	path: Array[Dictionary],
+	start_pos: Vector2,
+	start_heading: float,
+	end_pos: Vector2,
+	end_heading: float
+) -> void:
+	if path.is_empty():
+		path.append({"pos": start_pos, "heading_deg": start_heading})
+		path.append({"pos": end_pos, "heading_deg": end_heading})
+		return
+	var first: Dictionary = path[0]
+	var last: Dictionary = path[path.size() - 1]
+	if (first["pos"] as Vector2).distance_to(start_pos) > 0.05:
+		path.insert(0, {"pos": start_pos, "heading_deg": start_heading})
+	if (last["pos"] as Vector2).distance_to(end_pos) > 0.05:
+		path.append({"pos": end_pos, "heading_deg": end_heading})
+
+func _movement_state_dict_key(state: Dictionary) -> String:
+	var cell: Vector2i = state["cell"] as Vector2i
+	var heading_deg: float = float(state["heading_deg"])
+	var mp: int = int(state["mp"])
+	var heading_bucket: int = int(round(fposmod(heading_deg, 360.0) / TURN_STEP_DEG))
+	return "%d:%d:%d:%d" % [cell.x, cell.y, heading_bucket, mp]
+
+func _reconstruct_path_to_terminal(
+	start_pos: Vector2,
+	start_heading: float,
+	start_mp: int,
+	ship_class: String,
+	other_pos: Vector2,
+	other_heading: float,
+	other_ship_class: String,
+	start_cell: Vector2i,
+	sail_mul: float,
+	goal_terminal: Dictionary
+) -> Array[Dictionary]:
+	if goal_terminal.is_empty():
+		return []
+	var move_scale: float = _combat_move_scale_for(ship_class, start_heading, start_mp)
+	var turn_cost: int = _turn_cost_for(ship_class)
+	var goal_key: String = _movement_state_dict_key(goal_terminal)
+	var start_state: Dictionary = {
+		"pos": start_pos,
+		"heading_deg": start_heading,
+		"mp": start_mp,
+		"cell": start_cell
+	}
+	var open: Array[Dictionary] = [start_state]
+	var seen: Dictionary = {}
+	while not open.is_empty():
+		var state: Dictionary = open.pop_front()
+		var key: String = _movement_state_dict_key(state)
+		if seen.has(key):
+			continue
+		seen[key] = true
+		if key == goal_key:
+			return _walk_parents_to_path(state)
+		var pos: Vector2 = state["pos"]
+		var heading_deg: float = float(state["heading_deg"])
+		var mp: int = int(state["mp"])
+		var cell: Vector2i = state["cell"] as Vector2i
+		if mp >= 1:
+			var step_cells: float = _forward_cells_per_step(ship_class, heading_deg) * sail_mul * move_scale
+			var next_pos: Vector2 = pos + _bearing_deg_to_vector(heading_deg) * step_cells
+			if _is_valid_ship_pose(next_pos, heading_deg, ship_class, other_pos, other_heading, other_ship_class):
+				var next_cell: Vector2i = Vector2i(int(round(next_pos.x)), int(round(next_pos.y)))
+				var child: Dictionary = {
+					"pos": next_pos,
+					"heading_deg": heading_deg,
+					"mp": mp - 1,
+					"cell": next_cell,
+					"parent": state
+				}
+				open.append(child)
+		if mp >= turn_cost:
+			var left_heading_deg: float = fposmod(heading_deg - TURN_STEP_DEG, 360.0)
+			var right_heading_deg: float = fposmod(heading_deg + TURN_STEP_DEG, 360.0)
+			var turn_step: float = _forward_cells_per_step(ship_class, heading_deg) * sail_mul * move_scale * 0.72
+			var left_pos: Vector2 = pos + _bearing_deg_to_vector(left_heading_deg) * turn_step
+			if _is_valid_ship_pose(left_pos, left_heading_deg, ship_class, other_pos, other_heading, other_ship_class):
+				var lc: Vector2i = Vector2i(int(round(left_pos.x)), int(round(left_pos.y)))
+				var left_child: Dictionary = {
+					"pos": left_pos,
+					"heading_deg": left_heading_deg,
+					"mp": mp - turn_cost,
+					"cell": lc,
+					"parent": state
+				}
+				open.append(left_child)
+			var right_pos: Vector2 = pos + _bearing_deg_to_vector(right_heading_deg) * turn_step
+			if _is_valid_ship_pose(right_pos, right_heading_deg, ship_class, other_pos, other_heading, other_ship_class):
+				var rc: Vector2i = Vector2i(int(round(right_pos.x)), int(round(right_pos.y)))
+				var right_child: Dictionary = {
+					"pos": right_pos,
+					"heading_deg": right_heading_deg,
+					"mp": mp - turn_cost,
+					"cell": rc,
+					"parent": state
+				}
+				open.append(right_child)
+	return []
+
+func _walk_parents_to_path(end_state: Dictionary) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	var cur: Variant = end_state
+	while cur is Dictionary:
+		var d: Dictionary = cur
+		out.append({"pos": d["pos"] as Vector2, "heading_deg": float(d["heading_deg"])})
+		if not d.has("parent"):
+			break
+		cur = d["parent"]
+	out.reverse()
+	return out
+
+func _layout_opening_positions_at_cannon_range() -> void:
+	var cols: int = combat_cols
+	var rows: int = combat_rows
+	var mid_cx: float = (float(cols) - 1.0) * 0.38
+	var mid_cy: float = (float(rows) - 1.0) * 0.50
+	player_cell_pos = Vector2(mid_cx, mid_cy)
+	var d_t: float = minf(_cannon_range(player_ship_class), _cannon_range(enemy_ship_class)) * 0.96
+	var beam: Vector2 = _bearing_deg_to_vector(player_heading_deg + 90.0)
+	var inv_c: float = 1.0 / float(max(1, cols - 1))
+	var inv_r: float = 1.0 / float(max(1, rows - 1))
+	var k: float = sqrt(pow(beam.x * inv_c, 2.0) + pow(beam.y * inv_r, 2.0))
+	var sep_cells: float = d_t / maxf(1e-5, k)
+	enemy_cell_pos = player_cell_pos + beam * sep_cells
+	for _i in range(18):
+		if _is_valid_ship_pose(
+			enemy_cell_pos,
+			enemy_heading_deg,
+			enemy_ship_class,
+			player_cell_pos,
+			player_heading_deg,
+			player_ship_class
+		):
+			break
+		sep_cells *= 0.9
+		enemy_cell_pos = player_cell_pos + beam * sep_cells
+	enemy_cell_pos.x = clampf(enemy_cell_pos.x, 1.0, float(cols - 2))
+	enemy_cell_pos.y = clampf(enemy_cell_pos.y, 1.0, float(rows - 2))
 
 func _check_resolution_or_planning() -> void:
 	if enemy_hull <= 0:
@@ -457,8 +791,9 @@ func _resolve_cannon_shot(attacker_pos: Vector2, attacker_heading_deg: float, at
 	var arc_profile: Dictionary = _cannon_arc_profile(attacker_class)
 	var broadside_window: float = float(arc_profile.get("broadside_window", 34.0))
 	var chase_window: float = float(arc_profile.get("chase_window", 14.0))
+	var has_chase_guns: bool = bool(arc_profile.get("has_chase_guns", false))
 	var can_broadside: bool = absf(rel - 90.0) <= broadside_window
-	var can_chase: bool = rel <= chase_window or rel >= (180.0 - chase_window)
+	var can_chase: bool = has_chase_guns and chase_window > 0.0 and (rel <= chase_window or rel >= (180.0 - chase_window))
 	if not can_broadside and not can_chase:
 		return {"can_fire": false}
 	var shot_type: String = "broadside" if can_broadside else "chase guns"
@@ -478,15 +813,15 @@ func _resolve_cannon_shot(attacker_pos: Vector2, attacker_heading_deg: float, at
 func _cannon_arc_profile(ship_class: String) -> Dictionary:
 	match ship_class:
 		"Sloop":
-			return {"broadside_window": 36.0, "chase_window": 0.0}
+			return {"broadside_window": 36.0, "has_chase_guns": false, "chase_window": 14.0}
 		"Brig":
-			return {"broadside_window": 34.0, "chase_window": 0.0}
+			return {"broadside_window": 34.0, "has_chase_guns": false, "chase_window": 14.0}
 		"Frigate":
-			return {"broadside_window": 32.0, "chase_window": 0.0}
+			return {"broadside_window": 32.0, "has_chase_guns": false, "chase_window": 14.0}
 		"Merchantman":
-			return {"broadside_window": 30.0, "chase_window": 0.0}
+			return {"broadside_window": 30.0, "has_chase_guns": false, "chase_window": 14.0}
 		_:
-			return {"broadside_window": 34.0, "chase_window": 0.0}
+			return {"broadside_window": 34.0, "has_chase_guns": false, "chase_window": 14.0}
 
 func _is_target_stern_arc(attacker_pos: Vector2, target_pos: Vector2, target_heading_deg: float) -> bool:
 	var bearing_from_target: float = _vector_to_bearing_deg((attacker_pos - target_pos).normalized())
@@ -520,6 +855,12 @@ func _begin_planning_round() -> void:
 	player_plan_end_heading = player_heading_deg
 	player_plan_volley_when_in_range = false
 	player_plan_board = false
+	player_movement_plotted = false
+	player_plan_terminal.clear()
+	enemy_plan_terminal.clear()
+	player_plan_preview_path.clear()
+	player_round_path.clear()
+	enemy_round_path.clear()
 
 func _movement_points_for(ship_class: String, navigator_skill: int, heading_deg: float) -> int:
 	var base_mp: int = int(_ship_stats(ship_class).get("base_mp", 4))
@@ -551,30 +892,52 @@ func get_enemy_turn_cost() -> int:
 
 func get_player_movement_preview() -> Dictionary:
 	if phase != Phase.PLANNING:
-		return {"reachable_cells": [], "forward_cells": [], "forward_step_cells": 1.0}
+		return {"reachable_cells": [], "terminal_cells": [], "forward_cells": [], "forward_step_cells": 1.0}
+	var sail_mul: float = _sail_forward_multiplier(player_sail_setting)
 	var built: Dictionary = _build_movement_states(
 		player_cell_pos,
 		player_heading_deg,
 		player_move_points,
 		player_ship_class,
 		enemy_cell_pos,
-		player_cell
+		enemy_heading_deg,
+		enemy_ship_class,
+		player_cell,
+		sail_mul
 	)
 	var reachable: Dictionary = built["reachable"]
 	var forward_cells: Array[Vector2i] = built["forward_cells"]
 	var reachable_cells: Array[Vector2i] = []
 	for c in reachable.keys():
 		reachable_cells.append(c)
+	var terminals: Array[Dictionary] = _collect_terminal_states(
+		built["states"],
+		player_ship_class,
+		enemy_cell_pos,
+		enemy_heading_deg,
+		enemy_ship_class,
+		sail_mul,
+		float(built["move_scale"])
+	)
+	var term_seen: Dictionary = {}
+	var terminal_cells: Array[Vector2i] = []
+	for s in terminals:
+		var cell: Vector2i = s["cell"]
+		if term_seen.has(cell):
+			continue
+		term_seen[cell] = true
+		terminal_cells.append(cell)
 	return {
 		"reachable_cells": reachable_cells,
+		"terminal_cells": terminal_cells,
 		"forward_cells": forward_cells,
-		"forward_step_cells": _forward_cells_per_step(player_ship_class, player_heading_deg)
+		"forward_step_cells": _forward_cells_per_step(player_ship_class, player_heading_deg) * sail_mul * float(built["move_scale"])
 	}
 
 func get_player_reachable_cells() -> Array[Vector2i]:
 	var preview: Dictionary = get_player_movement_preview()
-	if preview.has("reachable_cells") and preview["reachable_cells"] is Array:
-		return preview["reachable_cells"]
+	if preview.has("terminal_cells") and preview["terminal_cells"] is Array:
+		return preview["terminal_cells"]
 	return []
 
 func can_player_move_to_cell(cell: Vector2i) -> bool:
@@ -593,6 +956,30 @@ func get_hazard_cells() -> Array[Vector2i]:
 		cells.append(cell)
 	return cells
 
+func get_combat_grid_feet() -> float:
+	return COMBAT_GRID_FEET
+
+func get_ship_length_cells(ship_class: String) -> int:
+	return int(_ship_stats(ship_class).get("length_cells", 4))
+
+func get_ship_width_cells(ship_class: String) -> int:
+	return int(_ship_stats(ship_class).get("width_cells", 1))
+
+func get_player_occupied_cells() -> Array[Vector2i]:
+	return _ship_occupied_cells(player_cell_pos, player_heading_deg, player_ship_class)
+
+func get_player_planned_occupied_cells() -> Array[Vector2i]:
+	return _ship_occupied_cells(player_plan_end_pos, player_plan_end_heading, player_ship_class)
+
+func get_enemy_occupied_cells() -> Array[Vector2i]:
+	return _ship_occupied_cells(enemy_cell_pos, enemy_heading_deg, enemy_ship_class)
+
+func get_player_occupied_cells_for_pose(pos: Vector2, heading_deg: float) -> Array[Vector2i]:
+	return _ship_occupied_cells(pos, heading_deg, player_ship_class)
+
+func get_enemy_occupied_cells_for_pose(pos: Vector2, heading_deg: float) -> Array[Vector2i]:
+	return _ship_occupied_cells(pos, heading_deg, enemy_ship_class)
+
 func _generate_hazards(near_land: bool) -> void:
 	hazard_cells.clear()
 	if not near_land:
@@ -606,7 +993,7 @@ func _generate_hazards(near_land: bool) -> void:
 		hazard_cells[Vector2i(combat_cols - 1, y)] = true
 
 func _check_collision_with_hazard(cell: Vector2i) -> bool:
-	if not hazard_cells.has(cell):
+	if not hazard_cells.has(cell) and not _ship_footprint_hits_hazard(player_cell_pos, player_heading_deg, player_ship_class):
 		return false
 	phase = Phase.RESOLVED
 	emit_signal("battle_updated", "Your ship strikes coastal hazards and is lost.")
@@ -614,12 +1001,206 @@ func _check_collision_with_hazard(cell: Vector2i) -> bool:
 	return true
 
 func _check_collision_with_hazard_enemy(cell: Vector2i) -> bool:
-	if not hazard_cells.has(cell):
+	if not hazard_cells.has(cell) and not _ship_footprint_hits_hazard(enemy_cell_pos, enemy_heading_deg, enemy_ship_class):
 		return false
 	phase = Phase.RESOLVED
 	emit_signal("battle_updated", "The enemy is thrown onto the shoals and breaks up.")
 	emit_signal("battle_finished", true, false)
 	return true
+
+func can_player_commit_round() -> bool:
+	if phase != Phase.PLANNING:
+		return false
+	if not player_movement_plotted:
+		return false
+	return _player_plan_matches_a_terminal()
+
+func is_player_movement_plotted() -> bool:
+	return player_movement_plotted
+
+func cycle_player_sail(delta: int) -> void:
+	if phase != Phase.PLANNING:
+		return
+	player_sail_setting = _sail_setting_from_index(int(player_sail_setting) + delta)
+	player_movement_plotted = false
+	player_plan_end_pos = player_cell_pos
+	player_plan_end_heading = player_heading_deg
+	player_plan_terminal.clear()
+	player_plan_preview_path.clear()
+
+func set_player_sail_setting(sail: SailSetting) -> void:
+	if phase != Phase.PLANNING:
+		return
+	player_sail_setting = sail
+	player_movement_plotted = false
+	player_plan_end_pos = player_cell_pos
+	player_plan_end_heading = player_heading_deg
+	player_plan_terminal.clear()
+	player_plan_preview_path.clear()
+
+func set_player_sail_index(idx: int) -> void:
+	set_player_sail_setting(_sail_setting_from_index(idx))
+
+func _sail_setting_from_index(i: int) -> SailSetting:
+	match posmod(i, 3):
+		0:
+			return SailSetting.SLOW
+		1:
+			return SailSetting.BATTLE
+		_:
+			return SailSetting.FULL
+
+func get_sail_movement_hints() -> Dictionary:
+	var out: Dictionary = {}
+	if phase != Phase.PLANNING:
+		return out
+	for si in range(3):
+		var sail: SailSetting = _sail_setting_from_index(si)
+		var mul: float = _sail_forward_multiplier(sail)
+		var built: Dictionary = _build_movement_states(
+			player_cell_pos,
+			player_heading_deg,
+			player_move_points,
+			player_ship_class,
+			enemy_cell_pos,
+			enemy_heading_deg,
+			enemy_ship_class,
+			player_cell,
+			mul
+		)
+		var terms: Array[Dictionary] = _collect_terminal_states(
+			built["states"],
+			player_ship_class,
+			enemy_cell_pos,
+			enemy_heading_deg,
+			enemy_ship_class,
+			mul,
+			float(built["move_scale"])
+		)
+		var max_cheb: int = 0
+		for s in terms:
+			max_cheb = maxi(max_cheb, _grid_chebyshev_distance(player_cell, s["cell"]))
+		var fwd: Array = built["forward_cells"]
+		var straight_n: int = fwd.size() if fwd is Array else 0
+		out[si] = {
+			"max_chebyshev": max_cheb,
+			"straight_cells": straight_n,
+			"forward_step_cells": _forward_cells_per_step(player_ship_class, player_heading_deg) * mul * float(built["move_scale"]),
+			"terminal_count": terms.size()
+		}
+	return out
+
+func _combat_move_scale_for(ship_class: String, start_heading: float, start_mp: int) -> float:
+	var hull_len: float = float(max(1, get_ship_length_cells(ship_class)))
+	var target_cells: float = STRAIGHT_HULL_LENGTHS_AT_FULL * hull_len
+	var unit_full: float = _forward_cells_per_step(ship_class, start_heading) * _sail_forward_multiplier(SailSetting.FULL)
+	var denom: float = maxf(0.25, float(maxi(1, start_mp)) * unit_full)
+	return clampf(target_cells / denom, COMBAT_MOVE_SCALE_MIN, COMBAT_MOVE_SCALE_MAX)
+
+func _sail_forward_multiplier(sail: SailSetting) -> float:
+	match sail:
+		SailSetting.SLOW:
+			return 0.72
+		SailSetting.BATTLE:
+			return 1.0
+		SailSetting.FULL:
+			return 1.28
+		_:
+			return 1.0
+
+func _better_player_terminal_for_cell(a: Dictionary, b: Dictionary) -> bool:
+	var am: int = int(a["mp"])
+	var bm: int = int(b["mp"])
+	if am == 0 and bm != 0:
+		return true
+	if bm == 0 and am != 0:
+		return false
+	if am != bm:
+		return am < bm
+	var ad: float = absf(_angle_delta_deg(player_heading_deg, float(a["heading_deg"])))
+	var bd: float = absf(_angle_delta_deg(player_heading_deg, float(b["heading_deg"])))
+	return ad < bd
+
+func _player_plan_matches_a_terminal() -> bool:
+	var sail_mul: float = _sail_forward_multiplier(player_sail_setting)
+	var built: Dictionary = _build_movement_states(
+		player_cell_pos,
+		player_heading_deg,
+		player_move_points,
+		player_ship_class,
+		enemy_cell_pos,
+		enemy_heading_deg,
+		enemy_ship_class,
+		player_cell,
+		sail_mul
+	)
+	var terminals: Array[Dictionary] = _collect_terminal_states(
+		built["states"],
+		player_ship_class,
+		enemy_cell_pos,
+		enemy_heading_deg,
+		enemy_ship_class,
+		sail_mul,
+		float(built["move_scale"])
+	)
+	var plan_cell: Vector2i = Vector2i(int(round(player_plan_end_pos.x)), int(round(player_plan_end_pos.y)))
+	var plan_h: int = _bearing_to_heading_idx(player_plan_end_heading)
+	for s in terminals:
+		if s["cell"] != plan_cell:
+			continue
+		if _bearing_to_heading_idx(float(s["heading_deg"])) != plan_h:
+			continue
+		return true
+	return false
+
+func _movement_state_can_expand(
+	s: Dictionary,
+	ship_class: String,
+	other_pos: Vector2,
+	other_heading_deg: float,
+	other_ship_class: String,
+	sail_mul: float,
+	move_scale: float
+) -> bool:
+	var pos: Vector2 = s["pos"]
+	var heading_deg: float = float(s["heading_deg"])
+	var mp: int = int(s["mp"])
+	var turn_cost: int = _turn_cost_for(ship_class)
+	if mp >= 1:
+		var step_cells: float = _forward_cells_per_step(ship_class, heading_deg) * sail_mul * move_scale
+		var next_pos: Vector2 = pos + _bearing_deg_to_vector(heading_deg) * step_cells
+		if _is_valid_ship_pose(next_pos, heading_deg, ship_class, other_pos, other_heading_deg, other_ship_class):
+			return true
+	if mp >= turn_cost:
+		var left_heading_deg: float = fposmod(heading_deg - TURN_STEP_DEG, 360.0)
+		var right_heading_deg: float = fposmod(heading_deg + TURN_STEP_DEG, 360.0)
+		var turn_step: float = _forward_cells_per_step(ship_class, heading_deg) * sail_mul * move_scale * 0.72
+		var left_pos: Vector2 = pos + _bearing_deg_to_vector(left_heading_deg) * turn_step
+		var right_pos: Vector2 = pos + _bearing_deg_to_vector(right_heading_deg) * turn_step
+		if _is_valid_ship_pose(left_pos, left_heading_deg, ship_class, other_pos, other_heading_deg, other_ship_class):
+			return true
+		if _is_valid_ship_pose(right_pos, right_heading_deg, ship_class, other_pos, other_heading_deg, other_ship_class):
+			return true
+	return false
+
+func _collect_terminal_states(
+	states: Array,
+	ship_class: String,
+	other_pos: Vector2,
+	other_heading_deg: float,
+	other_ship_class: String,
+	sail_mul: float,
+	move_scale: float
+) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for i in range(states.size()):
+		var s_variant: Variant = states[i]
+		if not (s_variant is Dictionary):
+			continue
+		var s: Dictionary = s_variant
+		if not _movement_state_can_expand(s, ship_class, other_pos, other_heading_deg, other_ship_class, sail_mul, move_scale):
+			out.append(s)
+	return out
 
 func _build_movement_states(
 	start_pos: Vector2,
@@ -627,8 +1208,12 @@ func _build_movement_states(
 	start_mp: int,
 	ship_class: String,
 	other_ship_pos: Vector2,
-	start_cell: Vector2i
+	other_ship_heading: float,
+	other_ship_class: String,
+	start_cell: Vector2i,
+	forward_sail_mul: float = 1.0
 ) -> Dictionary:
+	var move_scale: float = _combat_move_scale_for(ship_class, start_heading, start_mp)
 	var reachable: Dictionary = {}
 	var forward_cells: Array[Vector2i] = []
 	var open: Array[Dictionary] = [{
@@ -659,9 +1244,9 @@ func _build_movement_states(
 		reachable[cell] = true
 
 		if mp >= 1:
-			var step_cells: float = _forward_cells_per_step(ship_class, heading_deg)
+			var step_cells: float = _forward_cells_per_step(ship_class, heading_deg) * forward_sail_mul * move_scale
 			var next_pos: Vector2 = pos + _bearing_deg_to_vector(heading_deg) * step_cells
-			if _is_valid_pos(next_pos) and next_pos.distance_to(other_ship_pos) >= 1.0:
+			if _is_valid_ship_pose(next_pos, heading_deg, ship_class, other_ship_pos, other_ship_heading, other_ship_class):
 				var next_state: Dictionary = {"pos": next_pos, "heading_deg": heading_deg, "mp": mp - 1}
 				open.append(next_state)
 				all_states.append({
@@ -673,10 +1258,10 @@ func _build_movement_states(
 		if mp >= turn_cost:
 			var left_heading_deg: float = fposmod(heading_deg - TURN_STEP_DEG, 360.0)
 			var right_heading_deg: float = fposmod(heading_deg + TURN_STEP_DEG, 360.0)
-			var turn_step: float = _turn_forward_cells(ship_class, heading_deg)
+			var turn_step: float = _forward_cells_per_step(ship_class, heading_deg) * forward_sail_mul * move_scale * 0.72
 			var left_pos: Vector2 = pos + _bearing_deg_to_vector(left_heading_deg) * turn_step
 			var right_pos: Vector2 = pos + _bearing_deg_to_vector(right_heading_deg) * turn_step
-			if _is_valid_pos(left_pos) and left_pos.distance_to(other_ship_pos) >= 1.0:
+			if _is_valid_ship_pose(left_pos, left_heading_deg, ship_class, other_ship_pos, other_ship_heading, other_ship_class):
 				var left_state: Dictionary = {"pos": left_pos, "heading_deg": left_heading_deg, "mp": mp - turn_cost}
 				open.append(left_state)
 				all_states.append({
@@ -685,7 +1270,7 @@ func _build_movement_states(
 					"mp": mp - turn_cost,
 					"cell": Vector2i(int(round(left_pos.x)), int(round(left_pos.y)))
 				})
-			if _is_valid_pos(right_pos) and right_pos.distance_to(other_ship_pos) >= 1.0:
+			if _is_valid_ship_pose(right_pos, right_heading_deg, ship_class, other_ship_pos, other_ship_heading, other_ship_class):
 				var right_state: Dictionary = {"pos": right_pos, "heading_deg": right_heading_deg, "mp": mp - turn_cost}
 				open.append(right_state)
 				all_states.append({
@@ -697,20 +1282,23 @@ func _build_movement_states(
 
 	var straight_pos: Vector2 = start_pos
 	for _i in range(start_mp):
-		straight_pos += _bearing_deg_to_vector(start_heading) * _forward_cells_per_step(ship_class, start_heading)
-		if not _is_valid_pos(straight_pos) or straight_pos.distance_to(other_ship_pos) < 1.0:
+		straight_pos += _bearing_deg_to_vector(start_heading) * _forward_cells_per_step(ship_class, start_heading) * forward_sail_mul * move_scale
+		if not _is_valid_ship_pose(straight_pos, start_heading, ship_class, other_ship_pos, other_ship_heading, other_ship_class):
 			break
 		forward_cells.append(Vector2i(int(round(straight_pos.x)), int(round(straight_pos.y))))
 
 	return {
 		"reachable": reachable,
 		"forward_cells": forward_cells,
-		"states": all_states
+		"states": all_states,
+		"move_scale": move_scale
 	}
 
 func get_player_action_guidance() -> Dictionary:
 	if phase != Phase.PLANNING:
 		return {}
+	var sail_mul: float = _sail_forward_multiplier(player_sail_setting)
+	var move_scale: float = _combat_move_scale_for(player_ship_class, player_heading_deg, player_move_points)
 	var turn_cost: int = _turn_cost_for(player_ship_class)
 	var guidance := {
 		"forward": {
@@ -738,9 +1326,9 @@ func get_player_action_guidance() -> Dictionary:
 
 	# Forward action
 	if player_move_points >= 1:
-		var f_step: float = _forward_cells_per_step(player_ship_class, player_heading_deg)
+		var f_step: float = _forward_cells_per_step(player_ship_class, player_heading_deg) * sail_mul * move_scale
 		var f_pos: Vector2 = player_cell_pos + _bearing_deg_to_vector(player_heading_deg) * f_step
-		if _is_valid_pos(f_pos) and f_pos.distance_to(enemy_cell_pos) >= 1.0:
+		if _is_valid_ship_pose(f_pos, player_heading_deg, player_ship_class, enemy_cell_pos, enemy_heading_deg, enemy_ship_class):
 			guidance["forward"] = {
 				"label": "Forward",
 				"cost": 1,
@@ -749,12 +1337,12 @@ func get_player_action_guidance() -> Dictionary:
 				"target_pos": f_pos
 			}
 
-	# Left turn+advance
+	# Left turn+advance (matches _build_movement_states: port = -TURN_STEP_DEG)
 	if player_move_points >= turn_cost:
-		var left_heading: float = fposmod(player_heading_deg + TURN_STEP_DEG, 360.0)
-		var l_step: float = _turn_forward_cells(player_ship_class, left_heading)
+		var left_heading: float = fposmod(player_heading_deg - TURN_STEP_DEG, 360.0)
+		var l_step: float = _forward_cells_per_step(player_ship_class, player_heading_deg) * sail_mul * move_scale * 0.72
 		var l_pos: Vector2 = player_cell_pos + _bearing_deg_to_vector(left_heading) * l_step
-		if _is_valid_pos(l_pos) and l_pos.distance_to(enemy_cell_pos) >= 1.0:
+		if _is_valid_ship_pose(l_pos, left_heading, player_ship_class, enemy_cell_pos, enemy_heading_deg, enemy_ship_class):
 			guidance["left"] = {
 				"label": "Left Turn+Advance",
 				"cost": turn_cost,
@@ -763,12 +1351,12 @@ func get_player_action_guidance() -> Dictionary:
 				"target_pos": l_pos
 			}
 
-	# Right turn+advance
+	# Right turn+advance (starboard = +TURN_STEP_DEG)
 	if player_move_points >= turn_cost:
-		var right_heading: float = fposmod(player_heading_deg - TURN_STEP_DEG, 360.0)
-		var r_step: float = _turn_forward_cells(player_ship_class, right_heading)
+		var right_heading: float = fposmod(player_heading_deg + TURN_STEP_DEG, 360.0)
+		var r_step: float = _forward_cells_per_step(player_ship_class, player_heading_deg) * sail_mul * move_scale * 0.72
 		var r_pos: Vector2 = player_cell_pos + _bearing_deg_to_vector(right_heading) * r_step
-		if _is_valid_pos(r_pos) and r_pos.distance_to(enemy_cell_pos) >= 1.0:
+		if _is_valid_ship_pose(r_pos, right_heading, player_ship_class, enemy_cell_pos, enemy_heading_deg, enemy_ship_class):
 			guidance["right"] = {
 				"label": "Right Turn+Advance",
 				"cost": turn_cost,
@@ -846,6 +1434,65 @@ func _is_valid_cell(cell: Vector2i) -> bool:
 func _is_valid_pos(pos: Vector2) -> bool:
 	return pos.x >= 0.0 and pos.y >= 0.0 and pos.x <= float(combat_cols - 1) and pos.y <= float(combat_rows - 1)
 
+func _is_valid_ship_pose(
+	pos: Vector2,
+	heading_deg: float,
+	ship_class: String,
+	other_pos: Vector2,
+	other_heading_deg: float,
+	other_ship_class: String
+) -> bool:
+	if not _is_valid_pos(pos):
+		return false
+	var cells: Array[Vector2i] = _ship_occupied_cells(pos, heading_deg, ship_class)
+	for cell in cells:
+		if not _is_valid_cell(cell):
+			return false
+	var occupied: Dictionary = {}
+	for cell in _ship_occupied_cells(other_pos, other_heading_deg, other_ship_class):
+		occupied[cell] = true
+	for cell in cells:
+		if occupied.has(cell):
+			return false
+	return true
+
+func _ship_occupied_cells(pos: Vector2, heading_deg: float, ship_class: String) -> Array[Vector2i]:
+	var length_cells: int = max(1, get_ship_length_cells(ship_class))
+	var width_cells: int = max(1, get_ship_width_cells(ship_class))
+	var forward: Vector2 = _bearing_deg_to_vector(heading_deg)
+	var right := Vector2(-forward.y, forward.x)
+	var occupied: Dictionary = {}
+	for lx in range(length_cells):
+		var long_offset: float = float(lx) - (float(length_cells) - 1.0) * 0.5
+		for wy in range(width_cells):
+			var wide_offset: float = float(wy) - (float(width_cells) - 1.0) * 0.5
+			var p: Vector2 = pos + forward * long_offset + right * wide_offset
+			occupied[Vector2i(int(round(p.x)), int(round(p.y)))] = true
+	var cells: Array[Vector2i] = []
+	for cell in occupied.keys():
+		cells.append(cell)
+	return cells
+
+func _ship_footprint_hits_hazard(pos: Vector2, heading_deg: float, ship_class: String) -> bool:
+	for cell in _ship_occupied_cells(pos, heading_deg, ship_class):
+		if hazard_cells.has(cell):
+			return true
+	return false
+
+func _ship_footprint_distance(
+	a_pos: Vector2,
+	a_heading_deg: float,
+	a_ship_class: String,
+	b_pos: Vector2,
+	b_heading_deg: float,
+	b_ship_class: String
+) -> int:
+	var best: int = 999999
+	for a_cell in _ship_occupied_cells(a_pos, a_heading_deg, a_ship_class):
+		for b_cell in _ship_occupied_cells(b_pos, b_heading_deg, b_ship_class):
+			best = mini(best, _grid_chebyshev_distance(a_cell, b_cell))
+	return best
+
 func _grid_chebyshev_distance(a: Vector2i, b: Vector2i) -> int:
 	return maxi(absi(a.x - b.x), absi(a.y - b.y))
 
@@ -875,12 +1522,12 @@ func _angle_delta_deg(a: float, b: float) -> float:
 func _ship_stats(ship_class: String) -> Dictionary:
 	match ship_class:
 		"Sloop":
-			return {"hull": 14, "crew": 20, "maneuver": 0.06, "broadside": 4, "base_mp": 5, "turn_cost": 1, "forward_cells": 1.35}
+			return {"hull": 14, "crew": 20, "maneuver": 0.06, "broadside": 4, "base_mp": 5, "turn_cost": 1, "forward_cells": 1.35, "length_cells": 4, "width_cells": 1}
 		"Brig":
-			return {"hull": 18, "crew": 28, "maneuver": 0.055, "broadside": 5, "base_mp": 4, "turn_cost": 1, "forward_cells": 1.2}
+			return {"hull": 18, "crew": 28, "maneuver": 0.055, "broadside": 5, "base_mp": 4, "turn_cost": 1, "forward_cells": 1.2, "length_cells": 5, "width_cells": 2}
 		"Frigate":
-			return {"hull": 24, "crew": 40, "maneuver": 0.05, "broadside": 7, "base_mp": 3, "turn_cost": 2, "forward_cells": 1.05}
+			return {"hull": 24, "crew": 40, "maneuver": 0.05, "broadside": 7, "base_mp": 3, "turn_cost": 2, "forward_cells": 1.05, "length_cells": 6, "width_cells": 2}
 		"Merchantman":
-			return {"hull": 20, "crew": 22, "maneuver": 0.045, "broadside": 3, "base_mp": 3, "turn_cost": 2, "forward_cells": 0.95}
+			return {"hull": 20, "crew": 22, "maneuver": 0.045, "broadside": 3, "base_mp": 3, "turn_cost": 2, "forward_cells": 0.95, "length_cells": 5, "width_cells": 2}
 		_:
-			return {"hull": 16, "crew": 24, "maneuver": 0.055, "broadside": 4, "base_mp": 4, "turn_cost": 1, "forward_cells": 1.1}
+			return {"hull": 16, "crew": 24, "maneuver": 0.055, "broadside": 4, "base_mp": 4, "turn_cost": 1, "forward_cells": 1.1, "length_cells": 4, "width_cells": 1}

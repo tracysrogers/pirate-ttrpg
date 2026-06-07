@@ -79,6 +79,11 @@ var port_owner_overrides: Dictionary = {}
 ## Port under cursor for tooltip dwell (same port ~1s before popup).
 var port_hover_pending: String = ""
 var port_hover_since_msec: int = 0
+var _map_canvas_refresh_pending: bool = false
+var _last_dynamic_draw_pos: Vector2 = Vector2(-99999.0, -99999.0)
+var _travel_dynamic_redraw_accum: float = 0.0
+const TRAVEL_DYNAMIC_REDRAW_INTERVAL_SEC := 1.0 / 30.0
+const TRAVEL_DYNAMIC_REDRAW_MIN_DIST := 1.5
 
 const MAP_BG := Color(0.08, 0.2, 0.32)
 const LAND_COLOR := Color(0.83, 0.76, 0.58)
@@ -258,7 +263,7 @@ func _process(delta: float) -> void:
 			is_traveling = false
 			emit_signal("random_encounter_triggered")
 
-	_refresh_dynamic_canvas()
+	_maybe_refresh_dynamic_canvas(delta)
 
 func _setup_canvas_layers() -> void:
 	var under := _MapUnderLayer.new()
@@ -288,13 +293,46 @@ func _refresh_dynamic_canvas() -> void:
 		_layer_dynamic.queue_redraw()
 
 
-func _refresh_view_canvases() -> void:
+func _refresh_map_canvas_layers() -> void:
 	if _layer_under != null:
 		_layer_under.queue_redraw()
 	if _layer_dynamic != null:
 		_layer_dynamic.queue_redraw()
+
+
+func _refresh_over_canvas() -> void:
 	if _layer_over != null:
 		_layer_over.queue_redraw()
+
+
+func _refresh_view_canvases() -> void:
+	_refresh_map_canvas_layers()
+	_refresh_over_canvas()
+
+
+func _request_map_canvas_refresh() -> void:
+	if _map_canvas_refresh_pending:
+		return
+	_map_canvas_refresh_pending = true
+	call_deferred("_flush_map_canvas_refresh")
+
+
+func _flush_map_canvas_refresh() -> void:
+	_map_canvas_refresh_pending = false
+	_refresh_map_canvas_layers()
+
+
+func _maybe_refresh_dynamic_canvas(delta: float) -> void:
+	_travel_dynamic_redraw_accum += delta
+	var moved_enough: bool = (
+		current_position.distance_squared_to(_last_dynamic_draw_pos)
+		>= TRAVEL_DYNAMIC_REDRAW_MIN_DIST * TRAVEL_DYNAMIC_REDRAW_MIN_DIST
+	)
+	if not moved_enough and _travel_dynamic_redraw_accum < TRAVEL_DYNAMIC_REDRAW_INTERVAL_SEC:
+		return
+	_travel_dynamic_redraw_accum = 0.0
+	_last_dynamic_draw_pos = current_position
+	_refresh_dynamic_canvas()
 
 
 func draw_under_canvas(ci: CanvasItem) -> void:
@@ -600,7 +638,7 @@ func handle_input(event: InputEvent) -> bool:
 		last_pan_screen_pos = motion_event.position
 		view_offset -= delta / zoom_level
 		_clamp_view_offset()
-		_refresh_view_canvases()
+		_request_map_canvas_refresh()
 		return true
 
 	if event is InputEventMouseMotion:
@@ -631,7 +669,7 @@ func _zoom_at(screen_pos: Vector2, factor: float) -> void:
 	var after: Vector2 = _screen_to_world(screen_pos)
 	view_offset += before - after
 	_clamp_view_offset()
-	_refresh_view_canvases()
+	_request_map_canvas_refresh()
 
 func _clamp_view_offset() -> void:
 	var rect: Rect2 = _map_rect()

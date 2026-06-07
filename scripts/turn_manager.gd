@@ -23,3 +23,13 @@ func end_turn() -> void:
 	if current_team == Team.PLAYER:
 		turn_number += 1
 	emit_signal("turn_started", current_team)
+
+func get_save_state() -> Dictionary:
+	return {
+		"current_team": int(current_team),
+		"turn_number": turn_number
+	}
+
+func apply_save_state(state: Dictionary) -> void:
+	current_team = int(state.get("current_team", Team.PLAYER)) as Team
+	turn_number = maxi(1, int(state.get("turn_number", 1)))

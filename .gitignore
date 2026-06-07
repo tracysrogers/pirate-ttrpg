@@ -1,0 +1,54 @@
+# Godot editor cache (regenerated locally; never commit)
+.godot/
+
+# Raster images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tga
+*.webp
+*.ico
+*.exr
+*.hdr
+*.dds
+*.ktx
+*.ktx2
+
+# Vector / design source
+*.svg
+*.aseprite
+*.psd
+*.kra
+*.xcf
+
+# 3D models and scenes
+*.fbx
+*.obj
+*.blend
+*.blend1
+*.gltf
+*.glb
+*.dae
+*.stl
+*.ma
+*.mb
+*.unitypackage
+
+# Godot import sidecars for graphical assets
+*.png.import
+*.jpg.import
+*.jpeg.import
+*.gif.import
+*.bmp.import
+*.tga.import
+*.webp.import
+*.svg.import
+*.exr.import
+*.hdr.import
+*.fbx.import
+*.obj.import
+*.blend.import
+*.gltf.import
+*.glb.import

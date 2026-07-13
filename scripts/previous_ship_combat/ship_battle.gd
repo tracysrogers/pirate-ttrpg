@@ -1,5 +1,5 @@
 extends Node
-class_name ShipBattle
+class_name LegacyShipBattle
 
 signal battle_updated(text: String)
 signal boarding_started(attacker_is_player: bool)
@@ -91,27 +91,27 @@ var _sail_movement_hints_cache: Dictionary = {}
 var _player_move_options_cache_frame: int = -1
 var _player_move_options_cache_key: String = ""
 var _player_move_options_cache: bool = false
-const MOVE_ANIM_DURATION_SEC := 1.35
+const MOVE_ANIM_DURATION_SEC: float = 1.35
 var hazard_cells: Dictionary = {}
-const COMBAT_GRID_FEET := 12.5
+const COMBAT_GRID_FEET: float = 12.5
 ## Straight run at FULL sail should cover this many hull lengths (grid cells along track).
-const STRAIGHT_HULL_LENGTHS_AT_FULL := 3.0
-const COMBAT_MOVE_SCALE_MIN := 0.35
-const COMBAT_MOVE_SCALE_MAX := 1.95
-const TURN_STEP_DEG := 45.0
-const DISENGAGE_MIN_CELL_DIST := 52.0
-const CANNON_RELOAD_BASE_ROUNDS := 3
-const CANNON_RELOAD_MAX_ROUNDS := 10
-const CANNON_RELOAD_HULL_STRAIN_MAX := 2.35
-const CANNON_RELOAD_CREW_STRAIN_MAX := 1.85
-const CANNON_RELOAD_FATIGUE_MAX := 1.55
-const CANNON_RELOAD_FATIGUE_PER_ROUND := 0.024
+const STRAIGHT_HULL_LENGTHS_AT_FULL: float = 3.0
+const COMBAT_MOVE_SCALE_MIN: float = 0.35
+const COMBAT_MOVE_SCALE_MAX: float = 1.95
+const TURN_STEP_DEG: float = 45.0
+const DISENGAGE_MIN_CELL_DIST: float = 52.0
+const CANNON_RELOAD_BASE_ROUNDS: int = 3
+const CANNON_RELOAD_MAX_ROUNDS: int = 10
+const CANNON_RELOAD_HULL_STRAIN_MAX: float = 2.35
+const CANNON_RELOAD_CREW_STRAIN_MAX: float = 1.85
+const CANNON_RELOAD_FATIGUE_MAX: float = 1.55
+const CANNON_RELOAD_FATIGUE_PER_ROUND: float = 0.024
 ## Naval gunnery uses this cell size for range / accuracy (historical stand-in; crew skill later).
-const COMBAT_CELL_YARDS := 30.0
+const COMBAT_CELL_YARDS: float = 30.0
 ## Beyond this, batteries are treated as out of effective range (no volley / no gun-range cell).
-const CANNON_MAX_EFFECTIVE_RANGE_YARDS := 1500.0
+const CANNON_MAX_EFFECTIVE_RANGE_YARDS: float = 1500.0
 ## Placeholder until crew / officer stats feed gunnery (multiplier on per-gun hit chance).
-const GUNNERY_BASELINE_MULT := 1.0
+const GUNNERY_BASELINE_MULT: float = 1.0
 
 func start_battle(context: Dictionary = {}) -> void:
 	phase = Phase.PLANNING
@@ -354,7 +354,7 @@ func player_execute_move_leg() -> void:
 	emit_signal("battle_updated", "Your squadron moves (%d MP left after)." % remaining)
 
 func player_end_turn() -> void:
-	if phase != Phase.PLANNING:
+	if (phase as Phase) != Phase.PLANNING:
 		return
 	if get_ship_separation() >= DISENGAGE_MIN_CELL_DIST and enemy_behavior == "escape":
 		_finish_mutual_disengage(false)
@@ -411,7 +411,14 @@ func _build_enemy_plan() -> void:
 		var cell: Vector2i = s["cell"]
 		if cell == player_cell_now:
 			continue
+		var hdg: float = float(s["heading_deg"])
+		if _is_heading_in_irons(hdg):
+			continue
 		var sc: float = _score_enemy_destination_cell(cell, player_observed)
+		# Prefer staying out of irons and having a firing solution
+		var has_solution: bool = bool(_cannon_shot_classification(s["pos"], hdg, enemy_ship_class, player_observed, player_heading_deg).get("can_fire", false))
+		if has_solution:
+			sc += 2.0
 		if sc > best_score:
 			best_score = sc
 			best_terminal = s
@@ -765,7 +772,7 @@ func _resolve_enemy_turn_effects() -> bool:
 	var e_norm: Vector2 = enemy_position
 	var p_h: float = player_heading_deg
 	var e_h: float = enemy_heading_deg
-	var ev: Dictionary = _resolve_volley_orders_if_in_range(
+	var _ev: Dictionary = _resolve_volley_orders_if_in_range(
 		enemy_plan_volley_when_in_range, e_norm, e_h, enemy_ship_class, p_norm, p_h, false
 	)
 	if enemy_hull <= 0 or player_hull <= 0:
@@ -1392,18 +1399,20 @@ func _movement_points_for(ship_class: String, navigator_skill: int, heading_deg:
 	var wind_to_deg: float = fposmod(wind_direction_deg + 180.0, 360.0)
 	var diff: float = absf(_angle_delta_deg(heading_deg, wind_to_deg))
 	var wind_angle_mod: int = 0
-	if diff <= 45.0:
-		wind_angle_mod = 2
-	elif diff <= 95.0:
+	if diff < 35.0:
 		wind_angle_mod = 1
-	elif diff >= 150.0:
-		wind_angle_mod = -1
+	elif diff < 115.0:
+		wind_angle_mod = 2
+	elif diff < 145.0:
+		wind_angle_mod = 0
+	else:
+		wind_angle_mod = -2
 	var wind_speed_mod: int = 0
-	if wind_speed_m_s > 8.0:
+	if wind_speed_m_s > 10.0:
 		wind_speed_mod = 1
-	elif wind_speed_m_s < 3.0:
+	elif wind_speed_m_s < 2.5:
 		wind_speed_mod = -1
-	return clampi(base_mp + skill_bonus + wind_angle_mod + wind_speed_mod, 1, 8)
+	return clampi(base_mp + skill_bonus + wind_angle_mod + wind_speed_mod, 1, 9)
 
 func _turn_cost_for(ship_class: String) -> int:
 	return int(_ship_stats(ship_class).get("turn_cost", 1))
@@ -1666,11 +1675,13 @@ func get_sail_movement_hints() -> Dictionary:
 	_sail_movement_hints_cache = out
 	return out
 
-func _combat_move_scale_for(ship_class: String, start_heading: float, start_mp: int) -> float:
+func _combat_move_scale_for(ship_class: String, start_heading: float, _start_mp: int) -> float:
+	var stats: Dictionary = _ship_stats(ship_class)
 	var hull_len: float = float(max(1, get_ship_length_cells(ship_class)))
 	var target_cells: float = STRAIGHT_HULL_LENGTHS_AT_FULL * hull_len
 	var unit_full: float = _forward_cells_per_step(ship_class, start_heading) * _sail_forward_multiplier(SailSetting.FULL)
-	var denom: float = maxf(0.25, float(maxi(1, start_mp)) * unit_full)
+	var base_mp: int = int(stats.get("base_mp", 4))
+	var denom: float = maxf(0.25, float(maxi(1, base_mp)) * unit_full)
 	return clampf(target_cells / denom, COMBAT_MOVE_SCALE_MIN, COMBAT_MOVE_SCALE_MAX)
 
 func _sail_forward_multiplier(sail: SailSetting) -> float:
@@ -1695,19 +1706,11 @@ func _sail_turn_step_multiplier(sail: SailSetting) -> float:
 		_:
 			return 0.72
 
-func _min_run_cells_before_turn(sail: SailSetting) -> int:
-	match sail:
-		SailSetting.SLOW:
-			return 3
-		SailSetting.BATTLE:
-			return 2
-		SailSetting.FULL:
-			return 1
-		_:
-			return 2
+func _min_run_cells_before_turn(_sail: SailSetting) -> int:
+	return 0
 
-func _can_initiate_turn_from_state(state: Dictionary, sail: SailSetting) -> bool:
-	return int(state.get("run_cells", 0)) >= _min_run_cells_before_turn(sail)
+func _can_initiate_turn_from_state(_state: Dictionary, _sail: SailSetting) -> bool:
+	return true
 
 func _run_cells_after_forward(from_cell: Vector2i, from_run: int, to_cell: Vector2i) -> int:
 	var advanced: int = _grid_chebyshev_distance(from_cell, to_cell)
@@ -2292,7 +2295,15 @@ func _is_valid_ship_pose(
 		return false
 	if _ship_footprints_overlap(c, _heading_deg, ship_class, other_pos, _other_heading_deg, other_ship_class):
 		return false
+	if _is_heading_in_irons(_heading_deg):
+		return false
 	return true
+
+func _is_heading_in_irons(_heading_deg: float) -> bool:
+	# Allow ships to turn into the wind (in irons), but they move very slowly.
+	# We only block it if they are stationary or to prevent 'illegal' states if needed,
+	# but for pure turning we should allow it.
+	return false
 
 func _ship_footprints_overlap(
 	a_pos: Vector2,
@@ -2356,9 +2367,18 @@ func _forward_cells_per_step(ship_class: String, heading_deg: float) -> float:
 	var base: float = float(_ship_stats(ship_class).get("forward_cells", 1.2))
 	var wind_to_deg: float = fposmod(wind_direction_deg + 180.0, 360.0)
 	var diff: float = absf(_angle_delta_deg(heading_deg, wind_to_deg))
-	var angle_factor: float = lerpf(1.18, 0.82, diff / 180.0)
-	var wind_factor: float = clampf(0.86 + (wind_speed_m_s / 20.0), 0.8, 1.22)
-	return clampf(base * angle_factor * wind_factor, 0.7, 2.1)
+	var angle_factor: float
+	if diff < 120.0:
+		angle_factor = lerpf(1.2, 1.0, diff / 120.0)
+	elif diff < 150.0:
+		angle_factor = lerpf(1.0, 0.5, (diff - 120.0) / 30.0)
+	else:
+		angle_factor = lerpf(0.5, 0.2, (diff - 150.0) / 30.0)
+	var wind_factor: float = clampf(0.8 + (wind_speed_m_s / 15.0), 0.7, 1.3)
+	if diff > 160.0:
+		# Penalize speed heavily when in irons, but keep a higher minimum for turning
+		angle_factor *= 0.15
+	return clampf(base * angle_factor * wind_factor, 0.25, 2.5)
 
 func _turn_forward_cells(ship_class: String, heading_deg: float, sail: SailSetting = SailSetting.BATTLE) -> float:
 	return _forward_cells_per_step(ship_class, heading_deg) * _sail_turn_step_multiplier(sail)

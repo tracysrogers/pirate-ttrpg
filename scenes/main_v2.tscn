@@ -1,0 +1,44 @@
+[gd_scene format=3 uid="uid://cb6jqv2k0hh8y"]
+
+[ext_resource type="Script" uid="uid://jav68ik1k6ae" path="res://scripts/core/game_main.gd" id="1_nw2x2"]
+[ext_resource type="Script" uid="uid://d0yub8ve7jvkg" path="res://scripts/grid.gd" id="2_1h0cn"]
+[ext_resource type="Script" uid="uid://dqlrswo0pmepu" path="res://scripts/core/combat_turn_manager.gd" id="3_eyh5h"]
+[ext_resource type="Script" uid="uid://cshdlvgqegnp2" path="res://scripts/pathfinder.gd" id="4_hnawu"]
+[ext_resource type="Script" uid="uid://ccrgksiog1kad" path="res://scripts/game_logic_state.gd" id="5_0j1yy"]
+[ext_resource type="Script" uid="uid://27bo40vo5bqd" path="res://scripts/map_system.gd" id="6_veq2f"]
+[ext_resource type="Script" uid="uid://qtc5r1s3w0si" path="res://scripts/previous_ship_combat/ship_battle.gd" id="7_n3vc2"]
+[ext_resource type="Script" uid="uid://f714atn0t1a5" path="res://scripts/core/tactical_combat_v3.gd" id="8_n4v6j"]
+[ext_resource type="Script" uid="uid://d03ubnt6frrjk" path="res://scripts/ship_combat/ship_combat_manager.gd" id="9_newv2"]
+
+[node name="Main" type="Node2D" unique_id=2129644105]
+script = ExtResource("1_nw2x2")
+
+[node name="Grid" type="TileMapLayer" parent="." unique_id=1134723853]
+position = Vector2(80, 80)
+script = ExtResource("2_1h0cn")
+
+[node name="Units" type="Node2D" parent="." unique_id=173745868]
+
+[node name="CombatTurnManager" type="Node" parent="." unique_id=1003181946]
+script = ExtResource("3_eyh5h")
+
+[node name="Pathfinder" type="Node" parent="." unique_id=1877528959]
+script = ExtResource("4_hnawu")
+
+[node name="StrategicSystem" type="Node" parent="." unique_id=1016287494]
+script = ExtResource("5_0j1yy")
+
+[node name="WorldMap" type="Node2D" parent="." unique_id=894051029]
+script = ExtResource("6_veq2f")
+
+[node name="ShipBattle" type="Node" parent="." unique_id=236600515]
+script = ExtResource("7_n3vc2")
+
+[node name="ShipCombatV2" type="Node2D" parent="." unique_id=987654321]
+script = ExtResource("9_newv2")
+
+[node name="TacticalCombatSystem" type="Node" parent="." unique_id=1718261027]
+script = ExtResource("8_n4v6j")
+
+[node name="Camera2D" type="Camera2D" parent="." unique_id=50474250]
+position = Vector2(960, 540)

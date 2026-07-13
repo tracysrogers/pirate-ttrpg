@@ -28,19 +28,21 @@ It also includes an auto-travel Caribbean world map inspired by `Sid Meier's Pir
   - **Page Down (`ui_page_down`)**: Start town assault prototype.
 
 ## Project Layout
-- `scenes/main.tscn` - Main scene with all mode systems.
-- `scripts/game.gd` - Top-level mode routing and encounter flow.
-- `scripts/game_flow.gd` - Global mode/combat-type state.
-- `scripts/world_map.gd` - Caribbean auto-travel and encounter triggers.
+- `scenes/main_v2.tscn` - Main scene with all mode systems.
+- `scripts/core/game_main.gd` - Top-level mode routing, UI, and encounter flow.
+- `scripts/game_logic_state.gd` - Global mode/combat-type state.
+- `scripts/map_system.gd` - Caribbean auto-travel and encounter triggers.
 - `data/caribbean_land.json` - Imported real coastline polygons.
 - `data/wind_tiles_monthly.json` - Monthly wind speed/direction by map tile.
 - `tools/import_caribbean_land.py` - Natural Earth -> game polygon importer.
 - `tools/build_wind_tiles.py` - NASA POWER climatology -> wind tile grid.
-- `scripts/ship_battle.gd` - Naval turn phases + boarding transition.
+- `scripts/ship_combat/` - Rebuilt plan-then-execute naval combat (manager, ship unit/data, projectile, iso helpers).
+- `scripts/previous_ship_combat/` - Legacy naval combat kept for reference.
+- `scripts/core/tactical_combat_v3.gd` - Boarding/town-assault tactical combat.
 - `scripts/grid.gd` - Tactical grid rendering/helpers.
-- `scripts/unit.gd` - Tactical unit data and visuals.
+- `scripts/core/combat_unit.gd` - Tactical unit data and visuals.
 - `scripts/pathfinder.gd` - Reachable cell flood-fill.
-- `scripts/turn_manager.gd` - Tactical team turns.
+- `scripts/core/combat_turn_manager.gd` - Tactical team turns.
 
 ## Real Map Data Pipeline
 - Coastlines now come from Natural Earth (`ne_50m_land`) rather than hand-authored polygons.

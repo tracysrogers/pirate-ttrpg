@@ -1,0 +1,73 @@
+[gd_resource type="SpriteFrames" format=3 uid="uid://cvwvxb7ljaft0"]
+
+[ext_resource type="Texture2D" uid="uid://byu3ltf5ni1uq" path="res://assets/generated/pirate_sailor_idle.png" id="1_idle"]
+[ext_resource type="Texture2D" uid="uid://6jml0br7xhxc" path="res://assets/generated/pirate_sailor_walk.png" id="2_walk"]
+
+[sub_resource type="AtlasTexture" id="AtlasTexture_idle0"]
+atlas = ExtResource("1_idle")
+region = Rect2(0, 0, 32, 32)
+
+[sub_resource type="AtlasTexture" id="AtlasTexture_idle1"]
+atlas = ExtResource("1_idle")
+region = Rect2(32, 0, 32, 32)
+
+[sub_resource type="AtlasTexture" id="AtlasTexture_idle2"]
+atlas = ExtResource("1_idle")
+region = Rect2(64, 0, 32, 32)
+
+[sub_resource type="AtlasTexture" id="AtlasTexture_idle3"]
+atlas = ExtResource("1_idle")
+region = Rect2(96, 0, 32, 32)
+
+[sub_resource type="AtlasTexture" id="AtlasTexture_walk0"]
+atlas = ExtResource("2_walk")
+region = Rect2(0, 0, 32, 32)
+
+[sub_resource type="AtlasTexture" id="AtlasTexture_walk1"]
+atlas = ExtResource("2_walk")
+region = Rect2(32, 0, 32, 32)
+
+[sub_resource type="AtlasTexture" id="AtlasTexture_walk2"]
+atlas = ExtResource("2_walk")
+region = Rect2(64, 0, 32, 32)
+
+[sub_resource type="AtlasTexture" id="AtlasTexture_walk3"]
+atlas = ExtResource("2_walk")
+region = Rect2(96, 0, 32, 32)
+
+[resource]
+animations = [{
+"frames": [{
+"duration": 1.0,
+"texture": SubResource("AtlasTexture_idle0")
+}, {
+"duration": 1.0,
+"texture": SubResource("AtlasTexture_idle1")
+}, {
+"duration": 1.0,
+"texture": SubResource("AtlasTexture_idle2")
+}, {
+"duration": 1.0,
+"texture": SubResource("AtlasTexture_idle3")
+}],
+"loop": 1,
+"name": &"idle",
+"speed": 5.0
+}, {
+"frames": [{
+"duration": 1.0,
+"texture": SubResource("AtlasTexture_walk0")
+}, {
+"duration": 1.0,
+"texture": SubResource("AtlasTexture_walk1")
+}, {
+"duration": 1.0,
+"texture": SubResource("AtlasTexture_walk2")
+}, {
+"duration": 1.0,
+"texture": SubResource("AtlasTexture_walk3")
+}],
+"loop": 1,
+"name": &"walk",
+"speed": 5.0
+}]

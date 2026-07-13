@@ -1,3 +1,4 @@
+# Version 1.0.1
 extends RefCounted
 class_name CareerSystem
 
@@ -49,3 +50,4 @@ static func retirement_score(career_state: Dictionary, player_wealth: int) -> in
 	if family_rescued:
 		score += 450
 	return score
+

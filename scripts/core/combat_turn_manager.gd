@@ -1,8 +1,9 @@
+# Last Updated: 2026-07-05-192809
 extends Node
-class_name TurnManager
+class_name CombatTurnManager
 
-signal turn_started(team: int)
-signal turn_ended(team: int)
+signal turn_started(team: Team)
+signal turn_ended(team: Team)
 
 enum Team {
 	PLAYER,
@@ -15,14 +16,14 @@ var turn_number: int = 1
 func begin_battle() -> void:
 	current_team = Team.PLAYER
 	turn_number = 1
-	emit_signal("turn_started", current_team)
+	turn_started.emit(current_team)
 
 func end_turn() -> void:
-	emit_signal("turn_ended", current_team)
+	turn_ended.emit(current_team)
 	current_team = Team.ENEMY if current_team == Team.PLAYER else Team.PLAYER
 	if current_team == Team.PLAYER:
 		turn_number += 1
-	emit_signal("turn_started", current_team)
+	turn_started.emit(current_team)
 
 func get_save_state() -> Dictionary:
 	return {
@@ -33,3 +34,4 @@ func get_save_state() -> Dictionary:
 func apply_save_state(state: Dictionary) -> void:
 	current_team = int(state.get("current_team", Team.PLAYER)) as Team
 	turn_number = maxi(1, int(state.get("turn_number", 1)))
+

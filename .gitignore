@@ -1,6 +1,9 @@
 # Godot editor cache (regenerated locally; never commit)
 .godot/
 
+# Cursor/Ziva agent runtime (large binaries, not game content)
+addons/ziva_agent/
+
 # Raster images
 *.png
 *.jpg

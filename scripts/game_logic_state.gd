@@ -1,13 +1,15 @@
 extends Node
-class_name GameFlow
+class_name GameLogicState
 
-signal mode_changed(new_mode: int)
-signal combat_type_changed(new_type: int)
+
+signal mode_changed(new_mode: Mode)
+signal combat_type_changed(new_type: TacticalType)
 signal message_posted(text: String)
 
 enum Mode {
 	WORLD_MAP,
 	SHIP_COMBAT,
+	SHIP_COMBAT_V2,
 	TACTICAL_COMBAT
 }
 
@@ -23,13 +25,14 @@ func set_mode(mode: Mode) -> void:
 	if current_mode == mode:
 		return
 	current_mode = mode
-	emit_signal("mode_changed", current_mode)
+	mode_changed.emit(current_mode)
 
 func set_tactical_type(type: TacticalType) -> void:
 	if tactical_type == type:
 		return
 	tactical_type = type
-	emit_signal("combat_type_changed", tactical_type)
+	combat_type_changed.emit(tactical_type)
 
 func post_message(text: String) -> void:
-	emit_signal("message_posted", text)
+	message_posted.emit(text)
+

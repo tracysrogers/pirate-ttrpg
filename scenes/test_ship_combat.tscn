@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://testshipcombat"]
+
+[ext_resource type="Script" path="res://scripts/ship_combat/ship_combat_manager.gd" id="1_manager"]
+
+[node name="TestShipCombat" type="Node2D"]
+script = ExtResource("1_manager")

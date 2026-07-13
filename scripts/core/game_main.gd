@@ -1,16 +1,22 @@
 extends Node2D
+class_name GameMain
+# Cache Clear
+
 
 @onready var grid: BattleGrid = $Grid
 @onready var units_root: Node2D = $Units
-@onready var turn_manager: TurnManager = $TurnManager
-@onready var game_flow: GameFlow = $GameFlow
-@onready var world_map: WorldMap = $WorldMap
-@onready var ship_battle: ShipBattle = $ShipBattle
+@onready var turn_manager: CombatTurnManager = $CombatTurnManager
+@onready var game_flow: GameLogicState = $StrategicSystem
+@onready var world_map: MapSystem = $WorldMap
+@onready var ship_battle: LegacyShipBattle = $ShipBattle
 @onready var main_camera: Camera2D = $Camera2D
+@onready var tactical_combat: TacticalCombatSystem = $TacticalCombatSystem
+@onready var ship_combat_v2: ShipCombatManager = $ShipCombatV2
 
-var selected_unit: Unit = null
+var combat_renderer: LegacyCombatRendererV2
+var selected_unit: CombatUnit = null
 var reachable_cells: Array[Vector2i] = []
-var units: Array[Unit] = []
+var units: Array[CombatUnit] = []
 var current_boarding_is_player_attacking: bool = true
 var current_boarding_template_name: String = "brig"
 var boarding_objective_cell: Vector2i = Vector2i(7, 4)
@@ -117,15 +123,17 @@ var ship_combat_is_panning: bool = false
 var ship_combat_last_pan_pos: Vector2 = Vector2.ZERO
 ## -1 = none, 0 = port range, 1 = starboard range
 var ship_combat_range_highlight: int = -1
+var port_menu_overlay: ColorRect
 var main_menu_layer: CanvasLayer
 var main_menu_panel: PanelContainer
+var main_menu_overlay: ColorRect
 var main_menu_settings_panel: PanelContainer
 var main_menu_status_label: Label
 var main_menu_volume_slider: HSlider
 var main_menu_fullscreen_check: CheckBox
 var in_main_menu: bool = true
 var last_viewport_size: Vector2 = Vector2(-1.0, -1.0)
-var boarding_initiative_order: Array[Unit] = []
+var boarding_initiative_order: Array[CombatUnit] = []
 var boarding_initiative_index: int = 0
 var boarding_round: int = 1
 var boarding_selected_action: int = 0
@@ -178,7 +186,6 @@ const BOARDING_ACTION_RANGED := 1
 const BOARDING_ACTION_MELEE := 2
 const BOARDING_ACTION_END_TURN := 3
 const CREW_CARD_LABELS := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-const CareerSystemScript := preload("res://scripts/career_system.gd")
 const SUPPLY_UNIT_COST := 6
 const HULL_REPAIR_COST_PER_POINT := 28
 const CREW_ROSTER_HARD_MAX := 120
@@ -259,6 +266,7 @@ class SidebarWindCompassControl extends Control:
 
 func _ready() -> void:
 	randomize()
+	combat_renderer = LegacyCombatRendererV2.new(self)
 	_reset_career_state()
 	last_viewport_size = get_viewport_rect().size
 	_sync_camera_to_viewport()
@@ -278,6 +286,8 @@ func _ready() -> void:
 	ship_battle.battle_updated.connect(_on_ship_battle_updated)
 	ship_battle.boarding_started.connect(_on_boarding_started)
 	ship_battle.battle_finished.connect(_on_ship_battle_finished)
+	if ship_combat_v2:
+		ship_combat_v2.combat_finished.connect(_on_ship_combat_v2_finished)
 	_setup_tactical_units()
 	turn_manager.turn_started.connect(_on_turn_started)
 	_on_mode_changed(game_flow.current_mode)
@@ -291,11 +301,11 @@ func _process(delta: float) -> void:
 		_sync_camera_to_viewport()
 		_layout_worldmap_ui()
 		_layout_tactical_ui()
-	if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and ship_battle.phase == ShipBattle.Phase.MOVE_ANIM:
+	if game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT and ship_battle.phase == LegacyShipBattle.Phase.MOVE_ANIM:
 		ship_battle.advance_move_animation(delta)
 	# Ship combat / boarding HUD draws on this node; skip redundant invalidates on world map.
-	if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT or (
-		game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT and game_flow.tactical_type == GameFlow.TacticalType.BOARDING
+	if game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT or (
+		game_flow.current_mode == GameLogicState.Mode.TACTICAL_COMBAT and game_flow.tactical_type == GameLogicState.TacticalType.BOARDING
 	):
 		queue_redraw()
 
@@ -305,176 +315,12 @@ func _notification(what: int) -> void:
 		_layout_tactical_ui()
 
 func _draw() -> void:
-	if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT:
+	if game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT:
 		_sync_ship_move_selection()
-		var viewport_size: Vector2 = get_viewport_rect().size
-		var layout: Dictionary = _ship_combat_layout(viewport_size)
-		var hud_rect: Rect2 = layout["hud_rect"]
-		var combat_rect: Rect2 = layout["combat_rect"]
-		var options_rect: Rect2 = layout["options_rect"]
-		var grid_arena_rect: Rect2 = layout["grid_arena_rect"]
-		var nav_dims: Vector2i = _naval_combat_view_dims()
-		var nav_vc: int = nav_dims.x
-		var nav_vr: int = nav_dims.y
-		var base_grid_rect: Rect2 = _naval_grid_rect(grid_arena_rect, nav_vc, nav_vr)
-		var grid_rect: Rect2 = _ship_combat_view_rect(base_grid_rect)
-		var nav_view_origin: Vector2 = _ship_nav_view_origin(nav_vc, nav_vr)
-		var view_rect := Rect2(Vector2.ZERO, viewport_size)
-		draw_rect(view_rect, Color(0.08, 0.14, 0.2), true)
-		draw_rect(Rect2(Vector2(0.0, viewport_size.y * 0.62), Vector2(viewport_size.x, viewport_size.y * 0.38)), Color(0.06, 0.11, 0.18), true)
-		draw_rect(hud_rect, Color(0.02, 0.06, 0.1, 0.45), true)
-		draw_rect(combat_rect, Color(0.08, 0.16, 0.25, 0.45), false, 2.0)
-		_draw_naval_movement_water_background(grid_rect)
-		_draw_naval_battlefield_grid(grid_rect, nav_view_origin, nav_vc, nav_vr)
-		_draw_ship_hazards(grid_rect, nav_view_origin, nav_vc, nav_vr)
-		if ship_combat_range_highlight >= 0:
-			_draw_ship_gun_range_overlay(grid_rect, nav_view_origin, nav_vc, nav_vr, ship_combat_range_highlight)
-		if ship_battle.phase == ShipBattle.Phase.PLANNING:
-			_draw_ship_movement_preview(grid_rect, nav_view_origin, nav_vc, nav_vr)
-		_draw_ship_action_panel(options_rect)
-		var p_cell: Vector2 = ship_battle.get_player_display_cell_pos()
-		var p_hdg: float = ship_battle.get_player_display_heading_deg()
-		var e_cell: Vector2 = ship_battle.get_enemy_display_cell_pos()
-		var e_hdg: float = ship_battle.get_enemy_display_heading_deg()
-		var showing_plan_ghost: bool = (
-			ship_battle.phase == ShipBattle.Phase.PLANNING
-			and ship_battle.is_player_movement_plotted()
-		)
-		if showing_plan_ghost:
-			_draw_ship_cell_path_polyline(
-				grid_rect,
-				nav_view_origin,
-				nav_vc,
-				nav_vr,
-				ship_battle.get_player_plan_preview_path(),
-				Color(0.92, 0.82, 0.45, 0.55),
-				2.0
-			)
-		if ship_battle.phase == ShipBattle.Phase.MOVE_ANIM:
-			var anim_side: String = ship_battle.get_active_move_anim_side()
-			if anim_side == "player":
-				_draw_ship_cell_path_polyline(
-					grid_rect,
-					nav_view_origin,
-					nav_vc,
-					nav_vr,
-					ship_battle.player_round_path,
-					Color(0.55, 0.88, 1.0, 0.45),
-					2.5
-				)
-			elif anim_side == "enemy":
-				_draw_ship_cell_path_polyline(
-					grid_rect,
-					nav_view_origin,
-					nav_vc,
-					nav_vr,
-					ship_battle.enemy_round_path,
-					Color(1.0, 0.62, 0.42, 0.45),
-					2.5
-				)
+		combat_renderer.draw_ship_combat(self, get_viewport_rect().size)
+	elif game_flow.current_mode == GameLogicState.Mode.TACTICAL_COMBAT and game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
+		combat_renderer.draw_boarding_combat(self)
 
-		var player_center := _combat_to_screen(
-			_naval_combat_cell_pos_to_screen_norm(p_cell, ship_battle.combat_cols, ship_battle.combat_rows),
-			grid_rect,
-			ship_battle.combat_cols,
-			ship_battle.combat_rows,
-			nav_view_origin,
-			nav_vc,
-			nav_vr
-		)
-		var enemy_center := _combat_to_screen(
-			_naval_combat_cell_pos_to_screen_norm(e_cell, ship_battle.combat_cols, ship_battle.combat_rows),
-			grid_rect,
-			ship_battle.combat_cols,
-			ship_battle.combat_rows,
-			nav_view_origin,
-			nav_vc,
-			nav_vr
-		)
-		var ship_cell_size: float = minf(grid_rect.size.x / float(nav_vc), grid_rect.size.y / float(nav_vr))
-		var pr: int = ship_battle.get_player_port_cannon_reload_turns_remaining()
-		var ps: int = ship_battle.get_player_starboard_cannon_reload_turns_remaining()
-		var er: int = ship_battle.get_enemy_port_cannon_reload_turns_remaining()
-		var es: int = ship_battle.get_enemy_starboard_cannon_reload_turns_remaining()
-		_draw_ship_silhouette(player_center, ship_battle.player_ship_class, p_hdg, Color(0.58, 0.44, 0.29), ship_cell_size, 1.0, pr, ps)
-		if showing_plan_ghost:
-			var ghost_center := _combat_to_screen(
-				_naval_combat_cell_pos_to_screen_norm(ship_battle.player_plan_end_pos, ship_battle.combat_cols, ship_battle.combat_rows),
-				grid_rect,
-				ship_battle.combat_cols,
-				ship_battle.combat_rows,
-				nav_view_origin,
-				nav_vc,
-				nav_vr
-			)
-			_draw_ship_silhouette(
-				ghost_center,
-				ship_battle.player_ship_class,
-				ship_battle.player_plan_end_heading,
-				Color(0.58, 0.44, 0.29),
-				ship_cell_size,
-				0.38,
-				pr,
-				ps
-			)
-		_draw_ship_silhouette(enemy_center, ship_battle.enemy_ship_class, e_hdg, Color(0.46, 0.33, 0.22), ship_cell_size, 1.0, er, es)
-
-		var left_x: float = hud_rect.position.x + 18.0
-		var middle_x: float = hud_rect.position.x + hud_rect.size.x * 0.43
-		var right_limit_x: float = hud_rect.position.x + hud_rect.size.x - 20.0
-
-		var player_hull_max: int = ship_battle.get_ship_max_hull(ship_battle.player_ship_class)
-		var player_line := "Player Hull: %d/%d  Crew: %d (roster %d)" % [
-			ship_battle.player_hull,
-			player_hull_max,
-			ship_battle.player_crew,
-			crew_roster_size
-		]
-		var enemy_line := "Enemy Hull: %d  Crew: %d" % [ship_battle.enemy_hull, ship_battle.enemy_crew]
-		draw_string(ThemeDB.fallback_font, Vector2(left_x, hud_rect.position.y + 26.0), player_line, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - left_x, 20)
-		draw_string(ThemeDB.fallback_font, Vector2(left_x, hud_rect.position.y + 52.0), enemy_line, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - left_x, 20)
-
-		var phase_text := "Phase: Your turn — plan orders"
-		if ship_battle.phase == ShipBattle.Phase.MOVE_ANIM:
-			var anim_side: String = ship_battle.get_active_move_anim_side()
-			if anim_side == "enemy":
-				phase_text = "Phase: Enemy turn — executing"
-			else:
-				phase_text = "Phase: Your turn — executing"
-		elif ship_battle.phase == ShipBattle.Phase.RESOLVED:
-			phase_text = "Phase: Resolved"
-		draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 26.0), phase_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 20)
-		var mp_text := "Movement Points - You: %d | Enemy: %d" % [ship_battle.player_move_points, ship_battle.enemy_move_points]
-		draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 52.0), mp_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 18)
-		var gun_reload_text := "Guns P/S — You: %s/%s  Enemy: %s/%s" % [
-			_gun_reload_hud_token(ship_battle.get_player_port_cannon_reload_turns_remaining()),
-			_gun_reload_hud_token(ship_battle.get_player_starboard_cannon_reload_turns_remaining()),
-			_gun_reload_hud_token(ship_battle.get_enemy_port_cannon_reload_turns_remaining()),
-			_gun_reload_hud_token(ship_battle.get_enemy_starboard_cannon_reload_turns_remaining())
-		]
-		draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 76.0), gun_reload_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 16)
-		if ship_move_selected_cell.x >= 0 and ship_move_selected_heading_idx >= 0:
-			var face_label: String = SHIP_HEADING_LABELS[posmod(ship_move_selected_heading_idx, 8)]
-			var sel_text := "Move plan: (%d,%d) facing %s  Enter to set" % [
-				ship_move_selected_cell.x, ship_move_selected_cell.y, face_label
-			]
-			draw_string(ThemeDB.fallback_font, Vector2(middle_x, hud_rect.position.y + 100.0), sel_text, HORIZONTAL_ALIGNMENT_LEFT, right_limit_x - middle_x, 18)
-		if ship_combat_range_highlight >= 0:
-			var range_label: String = "Port" if ship_combat_range_highlight == 0 else "Starboard"
-			draw_string(
-				ThemeDB.fallback_font,
-				Vector2(left_x, hud_rect.position.y + 78.0),
-				"Range highlight: %s — Fire Cannons to shoot" % range_label,
-				HORIZONTAL_ALIGNMENT_LEFT,
-				right_limit_x - left_x,
-				16
-			)
-	elif game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT and game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
-		_draw_boarding_deck_surface()
-		_draw_boarding_units_overlay()
-		_draw_boarding_crew_cards()
-		var panel_rect: Rect2 = _boarding_action_panel_rect()
-		_draw_boarding_action_panel(panel_rect)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if in_main_menu:
@@ -512,14 +358,14 @@ func _unhandled_input(event: InputEvent) -> void:
 	if main_map_info_layer != null and main_map_info_layer.visible:
 		return
 
-	if game_flow.current_mode == GameFlow.Mode.WORLD_MAP and world_map.handle_input(event):
+	if game_flow.current_mode == GameLogicState.Mode.WORLD_MAP and world_map.handle_input(event):
 		return
 
-	if event is InputEventMouseMotion and game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT:
+	if event is InputEventMouseMotion and game_flow.current_mode == GameLogicState.Mode.TACTICAL_COMBAT:
 		var local_pos := grid.to_local(get_global_mouse_position())
 		grid.set_hovered_cell(grid.local_to_cell(local_pos))
 
-	if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and event is InputEventMouseMotion and ship_combat_is_panning:
+	if game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT and event is InputEventMouseMotion and ship_combat_is_panning:
 		var motion: InputEventMouseMotion = event
 		var delta: Vector2 = motion.position - ship_combat_last_pan_pos
 		ship_combat_pan += delta
@@ -528,15 +374,15 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		match game_flow.current_mode:
-			GameFlow.Mode.WORLD_MAP:
+			GameLogicState.Mode.WORLD_MAP:
 				_handle_world_map_click(get_global_mouse_position())
-			GameFlow.Mode.SHIP_COMBAT:
-				if ship_battle.phase == ShipBattle.Phase.PLANNING:
+			GameLogicState.Mode.SHIP_COMBAT:
+				if ship_battle.phase == LegacyShipBattle.Phase.PLANNING:
 					_handle_ship_combat_click(get_global_mouse_position())
-			GameFlow.Mode.TACTICAL_COMBAT:
+			GameLogicState.Mode.TACTICAL_COMBAT:
 				_handle_tactical_click(get_global_mouse_position())
 
-	if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and event is InputEventMouseButton:
+	if game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT and event is InputEventMouseButton:
 		var mb: InputEventMouseButton = event
 		if mb.button_index == MOUSE_BUTTON_MIDDLE or mb.button_index == MOUSE_BUTTON_RIGHT:
 			ship_combat_is_panning = mb.pressed
@@ -549,7 +395,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			ship_combat_zoom = clampf(ship_combat_zoom / 1.1, SHIP_COMBAT_MIN_ZOOM, SHIP_COMBAT_MAX_ZOOM)
 			return
 
-	if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and ship_battle.phase == ShipBattle.Phase.PLANNING:
+	if game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT and ship_battle.phase == LegacyShipBattle.Phase.PLANNING:
 		if event.is_action_pressed("ui_left"):
 			_move_ship_selection(Vector2i.LEFT)
 			return
@@ -565,8 +411,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event.is_action_pressed("ui_accept"):
 		match game_flow.current_mode:
-			GameFlow.Mode.SHIP_COMBAT:
-				if ship_battle.phase == ShipBattle.Phase.PLANNING:
+			GameLogicState.Mode.SHIP_COMBAT:
+				if ship_battle.phase == LegacyShipBattle.Phase.PLANNING:
 					if ship_battle.is_player_movement_plotted() and ship_battle.can_player_execute_move_leg():
 						ship_battle.player_execute_move_leg()
 					elif (
@@ -577,36 +423,36 @@ func _unhandled_input(event: InputEvent) -> void:
 						)
 					):
 						_confirm_ship_move_selection()
-			GameFlow.Mode.TACTICAL_COMBAT:
-				if game_flow.tactical_type != GameFlow.TacticalType.BOARDING:
+			GameLogicState.Mode.TACTICAL_COMBAT:
+				if game_flow.tactical_type != GameLogicState.TacticalType.BOARDING:
 					_end_turn()
 
 	if event is InputEventKey and event.pressed and not event.echo:
 		var key_event: InputEventKey = event
-		if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and ship_battle.phase == ShipBattle.Phase.PLANNING and key_event.keycode == KEY_F:
+		if game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT and ship_battle.phase == LegacyShipBattle.Phase.PLANNING and key_event.keycode == KEY_F:
 			if ship_combat_range_highlight >= 0:
 				ship_battle.player_fire_battery(ship_combat_range_highlight)
 			else:
 				game_flow.post_message("Highlight Range Port or Starboard, then press F or Fire Cannons.")
-		elif game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and ship_battle.phase == ShipBattle.Phase.PLANNING and key_event.keycode == KEY_E:
+		elif game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT and ship_battle.phase == LegacyShipBattle.Phase.PLANNING and key_event.keycode == KEY_E:
 			ship_battle.player_end_turn()
-		elif game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and ship_battle.phase == ShipBattle.Phase.PLANNING and key_event.keycode == KEY_BRACKETLEFT:
+		elif game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT and ship_battle.phase == LegacyShipBattle.Phase.PLANNING and key_event.keycode == KEY_BRACKETLEFT:
 			ship_battle.cycle_player_sail(-1)
 			_sync_ship_move_selection()
-		elif game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and ship_battle.phase == ShipBattle.Phase.PLANNING and key_event.keycode == KEY_BRACKETRIGHT:
+		elif game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT and ship_battle.phase == LegacyShipBattle.Phase.PLANNING and key_event.keycode == KEY_BRACKETRIGHT:
 			ship_battle.cycle_player_sail(1)
 			_sync_ship_move_selection()
-		elif game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT and game_flow.tactical_type == GameFlow.TacticalType.BOARDING and key_event.keycode == KEY_E:
+		elif game_flow.current_mode == GameLogicState.Mode.TACTICAL_COMBAT and game_flow.tactical_type == GameLogicState.TacticalType.BOARDING and key_event.keycode == KEY_E:
 			_end_boarding_actor_turn()
-		elif game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and ship_battle.phase == ShipBattle.Phase.PLANNING and key_event.keycode == KEY_X:
+		elif game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT and ship_battle.phase == LegacyShipBattle.Phase.PLANNING and key_event.keycode == KEY_X:
 			if ship_battle.can_player_disengage():
 				ship_battle.player_disengage()
 
-	if event.is_action_pressed("ui_select") and game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT:
+	if event.is_action_pressed("ui_select") and game_flow.current_mode == GameLogicState.Mode.TACTICAL_COMBAT:
 		game_flow.post_message("Manual resolve removed. Win by combat/objectives.")
 
 	if event.is_action_pressed("ui_cancel"):
-		if game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT:
+		if game_flow.current_mode == GameLogicState.Mode.TACTICAL_COMBAT:
 			_clear_selection()
 
 func _setup_tactical_units() -> void:
@@ -614,26 +460,26 @@ func _setup_tactical_units() -> void:
 		child.queue_free()
 	units.clear()
 
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		_configure_boarding_layout()
 		if current_boarding_is_player_attacking:
-			_spawn_units_from_cells(Unit.Team.PLAYER, boarding_attacker_spawn_cells)
-			_spawn_units_from_cells(Unit.Team.ENEMY, boarding_defender_spawn_cells)
+			_spawn_units_from_cells(CombatTurnManager.Team.PLAYER, boarding_attacker_spawn_cells)
+			_spawn_units_from_cells(CombatTurnManager.Team.ENEMY, boarding_defender_spawn_cells)
 		else:
-			_spawn_units_from_cells(Unit.Team.PLAYER, boarding_defender_spawn_cells)
-			_spawn_units_from_cells(Unit.Team.ENEMY, boarding_attacker_spawn_cells)
+			_spawn_units_from_cells(CombatTurnManager.Team.PLAYER, boarding_defender_spawn_cells)
+			_spawn_units_from_cells(CombatTurnManager.Team.ENEMY, boarding_attacker_spawn_cells)
 	else:
 		_clear_special_tactical_layout()
-		_create_unit(Unit.Team.PLAYER, Vector2i(2, 2))
-		_create_unit(Unit.Team.PLAYER, Vector2i(3, 4))
-		_create_unit(Unit.Team.ENEMY, Vector2i(10, 3))
-		_create_unit(Unit.Team.ENEMY, Vector2i(9, 6))
+		_create_unit(CombatTurnManager.Team.PLAYER, Vector2i(2, 2))
+		_create_unit(CombatTurnManager.Team.PLAYER, Vector2i(3, 4))
+		_create_unit(CombatTurnManager.Team.ENEMY, Vector2i(10, 3))
+		_create_unit(CombatTurnManager.Team.ENEMY, Vector2i(9, 6))
 	_assign_boarding_unit_labels()
 	_refresh_boarding_unit_visuals()
 	_layout_tactical_ui()
 
-func _create_unit(team: Unit.Team, cell: Vector2i, hp: int = -1, max_hp: int = -1) -> Unit:
-	var unit := Unit.new()
+func _create_unit(team: CombatTurnManager.Team, cell: Vector2i, hp: int = -1, max_hp: int = -1) -> CombatUnit:
+	var unit := CombatUnit.new()
 	unit.team = team
 	if max_hp > 0:
 		unit.max_hp = max_hp
@@ -646,7 +492,7 @@ func _create_unit(team: Unit.Team, cell: Vector2i, hp: int = -1, max_hp: int = -
 	units.append(unit)
 	return unit
 
-func _spawn_units_from_cells(team: Unit.Team, cells: Array[Vector2i]) -> void:
+func _spawn_units_from_cells(team: CombatTurnManager.Team, cells: Array[Vector2i]) -> void:
 	for cell in cells:
 		var spawn_cell := _resolve_spawn_cell(cell)
 		if spawn_cell == Vector2i(-1, -1):
@@ -672,13 +518,13 @@ func _handle_world_map_click(world_pos: Vector2) -> void:
 		game_flow.post_message("No sea route to that point.")
 
 func _handle_tactical_click(world_pos: Vector2) -> void:
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		var panel_rect: Rect2 = _boarding_action_panel_rect()
 		if panel_rect.has_point(world_pos):
 			if _boarding_action_button_rect(panel_rect, BOARDING_ACTION_MOVE).has_point(world_pos):
 				boarding_selected_action = BOARDING_ACTION_MOVE
-				var actor: Unit = _current_boarding_actor()
-				if actor != null and actor.team == Unit.Team.PLAYER:
+				var actor: CombatUnit = _current_boarding_actor()
+				if actor != null and actor.team == CombatTurnManager.Team.PLAYER:
 					_select_unit(actor)
 			elif _boarding_action_button_rect(panel_rect, BOARDING_ACTION_RANGED).has_point(world_pos):
 				boarding_selected_action = BOARDING_ACTION_RANGED
@@ -688,8 +534,8 @@ func _handle_tactical_click(world_pos: Vector2) -> void:
 				_end_boarding_actor_turn()
 			return
 
-	var active_actor: Unit = _current_boarding_actor() if game_flow.tactical_type == GameFlow.TacticalType.BOARDING else null
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING and (active_actor == null or active_actor.team != Unit.Team.PLAYER):
+	var active_actor: CombatUnit = _current_boarding_actor() if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING else null
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING and (active_actor == null or active_actor.team != CombatTurnManager.Team.PLAYER):
 		return
 
 	var local_pos := grid.to_local(world_pos)
@@ -705,7 +551,7 @@ func _handle_tactical_click(world_pos: Vector2) -> void:
 		return
 	var clicked_unit := _get_unit_at(clicked_cell)
 	if selected_unit != null and clicked_unit != null and clicked_unit.team != selected_unit.team:
-		if game_flow.tactical_type == GameFlow.TacticalType.BOARDING and boarding_selected_action == BOARDING_ACTION_RANGED:
+		if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING and boarding_selected_action == BOARDING_ACTION_RANGED:
 			_perform_ranged_attack(selected_unit, clicked_unit)
 			return
 		if _can_melee_attack(selected_unit, clicked_unit):
@@ -722,10 +568,10 @@ func _handle_tactical_click(world_pos: Vector2) -> void:
 
 	_clear_selection()
 
-func _select_unit(unit: Unit) -> void:
-	if game_flow.tactical_type != GameFlow.TacticalType.BOARDING and unit.has_acted:
+func _select_unit(unit: CombatUnit) -> void:
+	if game_flow.tactical_type != GameLogicState.TacticalType.BOARDING and unit.has_acted:
 		return
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING and unit != _current_boarding_actor():
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING and unit != _current_boarding_actor():
 		return
 	if selected_unit != null:
 		selected_unit.set_selected(false)
@@ -734,7 +580,7 @@ func _select_unit(unit: Unit) -> void:
 	selected_unit.set_selected(true)
 
 	reachable_cells.clear()
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING and (boarding_selected_action != BOARDING_ACTION_MOVE or boarding_actor_moved):
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING and (boarding_selected_action != BOARDING_ACTION_MOVE or boarding_actor_moved):
 		grid.set_highlighted([])
 		return
 	var blocked := _blocked_cells_for(unit)
@@ -750,48 +596,48 @@ func _clear_selection() -> void:
 	_refresh_boarding_unit_visuals()
 
 func _move_selected_unit(target_cell: Vector2i) -> void:
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		if boarding_actor_moved:
 			return
 		if grid.is_cell_blocked(target_cell):
 			return
 	selected_unit.cell = target_cell
 	selected_unit.position = _unit_world_from_cell(target_cell)
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		boarding_actor_moved = true
 	else:
 		selected_unit.set_acted(true)
 	_clear_selection()
 	_check_tactical_outcome()
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		if boarding_actor_attacked:
 			_advance_boarding_turn()
 		else:
-			var actor: Unit = _current_boarding_actor()
-			if actor != null and actor.team == Unit.Team.PLAYER:
+			var actor: CombatUnit = _current_boarding_actor()
+			if actor != null and actor.team == CombatTurnManager.Team.PLAYER:
 				_select_unit(actor)
 	else:
 		_check_auto_end_turn()
 
 func _end_turn() -> void:
-	if game_flow.current_mode != GameFlow.Mode.TACTICAL_COMBAT:
+	if game_flow.current_mode != GameLogicState.Mode.TACTICAL_COMBAT:
 		return
 	_clear_selection()
 	turn_manager.end_turn()
 
 func _on_turn_started(team: int) -> void:
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		return
 	for unit in units:
 		if unit.team == team:
 			unit.set_acted(false)
 
-	if team == TurnManager.Team.ENEMY:
+	if team == CombatTurnManager.Team.ENEMY:
 		_take_enemy_tactical_turn()
 
 func _take_enemy_tactical_turn() -> void:
 	for unit in units:
-		if unit.team != Unit.Team.ENEMY:
+		if unit.team != CombatTurnManager.Team.ENEMY:
 			continue
 		if unit.has_acted:
 			continue
@@ -817,22 +663,22 @@ func _take_enemy_tactical_turn() -> void:
 	_end_turn()
 
 func _check_auto_end_turn() -> void:
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		return
 	for unit in units:
 		if _unit_matches_current_team(unit) and not unit.has_acted:
 			return
 	_end_turn()
 
-func _get_unit_at(cell: Vector2i) -> Unit:
+func _get_unit_at(cell: Vector2i) -> CombatUnit:
 	for unit in units:
 		if unit.cell == cell:
 			return unit
 	return null
 
-func _blocked_cells_for(active_unit: Unit) -> Dictionary:
+func _blocked_cells_for(active_unit: CombatUnit) -> Dictionary:
 	var blocked := {}
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		for x in range(grid.width):
 			for y in range(grid.height):
 				var deck_cell := Vector2i(x, y)
@@ -846,14 +692,14 @@ func _blocked_cells_for(active_unit: Unit) -> Dictionary:
 		blocked[unit.cell] = true
 	return blocked
 
-func _unit_matches_current_team(unit: Unit) -> bool:
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+func _unit_matches_current_team(unit: CombatUnit) -> bool:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		return unit == _current_boarding_actor()
-	if turn_manager.current_team == TurnManager.Team.PLAYER:
-		return unit.team == Unit.Team.PLAYER
-	return unit.team == Unit.Team.ENEMY
+	if turn_manager.current_team == CombatTurnManager.Team.PLAYER:
+		return unit.team == CombatTurnManager.Team.PLAYER
+	return unit.team == CombatTurnManager.Team.ENEMY
 
-func _set_mode(mode: GameFlow.Mode) -> void:
+func _set_mode(mode: GameLogicState.Mode) -> void:
 	game_flow.set_mode(mode)
 
 func _on_mode_changed(new_mode: int) -> void:
@@ -863,16 +709,31 @@ func _on_mode_changed(new_mode: int) -> void:
 		world_map.visible = false
 		_sync_camera_to_viewport()
 		return
-	var tactical_visible := new_mode == GameFlow.Mode.TACTICAL_COMBAT
-	var boarding_tactical := tactical_visible and game_flow.tactical_type == GameFlow.TacticalType.BOARDING
+
+	# Handle ShipCombatV2 activation
+	if ship_combat_v2:
+		ship_combat_v2.set_active(new_mode == GameLogicState.Mode.SHIP_COMBAT_V2)
+
+	# The world/gameplay HUD would otherwise render on top of the V2 naval scene,
+	# which manages its own camera and UI.
+	var hide_world_hud: bool = new_mode == GameLogicState.Mode.SHIP_COMBAT_V2
+	if left_sidebar_layer != null:
+		left_sidebar_layer.visible = not hide_world_hud
+	if captain_log_layer != null:
+		captain_log_layer.visible = not hide_world_hud
+	if time_controls_layer != null:
+		time_controls_layer.visible = not hide_world_hud
+
+	var tactical_visible: bool = new_mode == GameLogicState.Mode.TACTICAL_COMBAT
+	var boarding_tactical: bool = tactical_visible and game_flow.tactical_type == GameLogicState.TacticalType.BOARDING
 	grid.visible = tactical_visible and not boarding_tactical
 	units_root.visible = tactical_visible and not boarding_tactical
-	world_map.visible = new_mode == GameFlow.Mode.WORLD_MAP
+	world_map.visible = new_mode == GameLogicState.Mode.WORLD_MAP
 	if port_menu_layer != null:
-		port_menu_layer.visible = new_mode == GameFlow.Mode.WORLD_MAP and port_menu_active
-	if main_map_info_layer != null and new_mode != GameFlow.Mode.WORLD_MAP:
+		port_menu_layer.visible = new_mode == GameLogicState.Mode.WORLD_MAP and port_menu_active
+	if main_map_info_layer != null and new_mode != GameLogicState.Mode.WORLD_MAP:
 		main_map_info_layer.visible = false
-	if new_mode == GameFlow.Mode.SHIP_COMBAT:
+	if new_mode == GameLogicState.Mode.SHIP_COMBAT:
 		ship_combat_selected_action = -1
 		ship_combat_range_highlight = -1
 		ship_combat_zoom = 2.5
@@ -884,7 +745,7 @@ func _on_mode_changed(new_mode: int) -> void:
 	_layout_tactical_ui()
 	if world_map.visible:
 		call_deferred("_layout_worldmap_ui")
-	if new_mode == GameFlow.Mode.WORLD_MAP:
+	if new_mode == GameLogicState.Mode.WORLD_MAP:
 		_refresh_sidebar_ship_status()
 
 func _on_message_posted(text: String) -> void:
@@ -917,11 +778,11 @@ func _on_ship_battle_updated(text: String) -> void:
 
 func _on_boarding_started(attacker_is_player: bool) -> void:
 	current_boarding_is_player_attacking = attacker_is_player
-	game_flow.set_tactical_type(GameFlow.TacticalType.BOARDING)
+	game_flow.set_tactical_type(GameLogicState.TacticalType.BOARDING)
 	boarding_active = true
 	boarding_defender_hold_progress = 0
 	_setup_tactical_units()
-	_set_mode(GameFlow.Mode.TACTICAL_COMBAT)
+	_set_mode(GameLogicState.Mode.TACTICAL_COMBAT)
 	_start_boarding_initiative()
 
 	if attacker_is_player:
@@ -943,7 +804,7 @@ func _on_ship_battle_finished(player_won: bool, disengaged: bool = false) -> voi
 	if disengaged:
 		last_ship_battle_enemy_faction = ""
 		last_ship_battle_player_aggressor = false
-		_set_mode(GameFlow.Mode.WORLD_MAP)
+		_set_mode(GameLogicState.Mode.WORLD_MAP)
 		return
 	_apply_ship_battle_faction_reputation(player_won)
 	_try_progress_governor_mission_naval_win(player_won, enemy_faction_snapshot, was_aggressor_snapshot)
@@ -955,7 +816,7 @@ func _on_ship_battle_finished(player_won: bool, disengaged: bool = false) -> voi
 		game_flow.post_message("Your ship is beaten. Retreating to world map.")
 	last_ship_battle_enemy_faction = ""
 	last_ship_battle_player_aggressor = false
-	_set_mode(GameFlow.Mode.WORLD_MAP)
+	_set_mode(GameLogicState.Mode.WORLD_MAP)
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey:
@@ -971,31 +832,31 @@ func _input(event: InputEvent) -> void:
 		return
 
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_T:
-		if game_flow.current_mode == GameFlow.Mode.WORLD_MAP and can_start_town_assault:
+		if game_flow.current_mode == GameLogicState.Mode.WORLD_MAP and can_start_town_assault:
 			_start_town_assault_demo()
-		elif game_flow.current_mode == GameFlow.Mode.WORLD_MAP:
+		elif game_flow.current_mode == GameLogicState.Mode.WORLD_MAP:
 			game_flow.post_message("Sail to a port first, then press T to begin a town assault.")
 
 	if event.is_action_pressed("ui_page_down"):
-		if game_flow.current_mode == GameFlow.Mode.WORLD_MAP and can_start_town_assault:
+		if game_flow.current_mode == GameLogicState.Mode.WORLD_MAP and can_start_town_assault:
 			_start_town_assault_demo()
 
 func _start_town_assault_demo() -> void:
-	game_flow.set_tactical_type(GameFlow.TacticalType.TOWN_ASSAULT)
+	game_flow.set_tactical_type(GameLogicState.TacticalType.TOWN_ASSAULT)
 	boarding_active = false
 	can_start_town_assault = false
 	_setup_tactical_units()
-	_set_mode(GameFlow.Mode.TACTICAL_COMBAT)
+	_set_mode(GameLogicState.Mode.TACTICAL_COMBAT)
 	turn_manager.begin_battle()
 	if last_arrived_port != "":
 		game_flow.post_message("Town assault at %s started (prototype)." % last_arrived_port)
 	else:
 		game_flow.post_message("Town assault started (prototype). Capture key structures next.")
 
-func _can_melee_attack(attacker: Unit, defender: Unit) -> bool:
+func _can_melee_attack(attacker: CombatUnit, defender: CombatUnit) -> bool:
 	if attacker == null or defender == null:
 		return false
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		if attacker != _current_boarding_actor():
 			return false
 		if boarding_actor_attacked:
@@ -1004,10 +865,10 @@ func _can_melee_attack(attacker: Unit, defender: Unit) -> bool:
 		return false
 	return _manhattan(attacker.cell, defender.cell) == 1
 
-func _perform_melee_attack(attacker: Unit, defender: Unit, silent: bool = false) -> void:
+func _perform_melee_attack(attacker: CombatUnit, defender: CombatUnit, silent: bool = false) -> void:
 	var damage := randi_range(attacker.melee_damage_min, attacker.melee_damage_max)
 	var died := defender.take_damage(damage)
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		boarding_actor_attacked = true
 	else:
 		attacker.set_acted(true)
@@ -1021,15 +882,15 @@ func _perform_melee_attack(attacker: Unit, defender: Unit, silent: bool = false)
 
 	_clear_selection()
 	_check_tactical_outcome()
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		_advance_boarding_turn()
 	else:
 		_check_auto_end_turn()
 
-func _perform_ranged_attack(attacker: Unit, defender: Unit, silent: bool = false) -> void:
+func _perform_ranged_attack(attacker: CombatUnit, defender: CombatUnit, silent: bool = false) -> void:
 	if attacker == null or defender == null:
 		return
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		if attacker != _current_boarding_actor() or boarding_actor_attacked:
 			return
 	elif attacker.has_acted:
@@ -1047,7 +908,7 @@ func _perform_ranged_attack(attacker: Unit, defender: Unit, silent: bool = false
 	var cover_bonus: int = _cover_bonus_for(defender.cell)
 	var hit_chance: float = clampf(0.78 - (float(distance - 2) * 0.07) - (float(cover_bonus) * 0.12), 0.25, 0.9)
 	if randf() > hit_chance:
-		if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+		if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 			boarding_actor_attacked = true
 		else:
 			attacker.set_acted(true)
@@ -1055,7 +916,7 @@ func _perform_ranged_attack(attacker: Unit, defender: Unit, silent: bool = false
 			game_flow.post_message("%s fires and misses (%d%% hit)." % [_unit_label(attacker), int(round(hit_chance * 100.0))])
 		_clear_selection()
 		_check_tactical_outcome()
-		if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+		if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 			_advance_boarding_turn()
 		else:
 			_check_auto_end_turn()
@@ -1063,7 +924,7 @@ func _perform_ranged_attack(attacker: Unit, defender: Unit, silent: bool = false
 	var damage: int = randi_range(1, 3) - cover_bonus
 	damage = max(1, damage)
 	var died: bool = defender.take_damage(damage)
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		boarding_actor_attacked = true
 	else:
 		attacker.set_acted(true)
@@ -1076,17 +937,17 @@ func _perform_ranged_attack(attacker: Unit, defender: Unit, silent: bool = false
 		_remove_unit(defender)
 	_clear_selection()
 	_check_tactical_outcome()
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		_advance_boarding_turn()
 	else:
 		_check_auto_end_turn()
 
-func _remove_unit(unit: Unit) -> void:
+func _remove_unit(unit: CombatUnit) -> void:
 	units.erase(unit)
 	_prune_boarding_initiative()
 	unit.queue_free()
 
-func _alive_count(team: Unit.Team) -> int:
+func _alive_count(team: CombatTurnManager.Team) -> int:
 	var count := 0
 	for unit in units:
 		if unit.team == team:
@@ -1095,12 +956,12 @@ func _alive_count(team: Unit.Team) -> int:
 
 func _start_boarding_initiative() -> void:
 	boarding_initiative_order.clear()
-	var players: Array[Unit] = []
-	var enemies: Array[Unit] = []
+	var players: Array[CombatUnit] = []
+	var enemies: Array[CombatUnit] = []
 	for unit in units:
 		if unit != null and is_instance_valid(unit):
 			unit.set_acted(false)
-			if unit.team == Unit.Team.PLAYER:
+			if unit.team == CombatTurnManager.Team.PLAYER:
 				players.append(unit)
 			else:
 				enemies.append(unit)
@@ -1114,24 +975,24 @@ func _start_boarding_initiative() -> void:
 	boarding_initiative_index = 0
 	boarding_round = 1
 	boarding_selected_action = BOARDING_ACTION_MOVE
-	boarding_initial_player_boarders = _alive_count(Unit.Team.PLAYER)
-	boarding_initial_enemy_boarders = _alive_count(Unit.Team.ENEMY)
+	boarding_initial_player_boarders = _alive_count(CombatTurnManager.Team.PLAYER)
+	boarding_initial_enemy_boarders = _alive_count(CombatTurnManager.Team.ENEMY)
 	_begin_boarding_actor_turn()
 
-func _current_boarding_actor() -> Unit:
-	if game_flow.tactical_type != GameFlow.TacticalType.BOARDING:
+func _current_boarding_actor() -> CombatUnit:
+	if game_flow.tactical_type != GameLogicState.TacticalType.BOARDING:
 		return null
 	if boarding_initiative_order.is_empty():
 		return null
 	if boarding_initiative_index < 0 or boarding_initiative_index >= boarding_initiative_order.size():
 		return null
-	var actor: Unit = boarding_initiative_order[boarding_initiative_index]
+	var actor: CombatUnit = boarding_initiative_order[boarding_initiative_index]
 	if actor == null or not is_instance_valid(actor):
 		return null
 	return actor
 
 func _begin_boarding_actor_turn() -> void:
-	var actor: Unit = _current_boarding_actor()
+	var actor: CombatUnit = _current_boarding_actor()
 	if actor == null:
 		return
 	boarding_actor_moved = false
@@ -1141,16 +1002,16 @@ func _begin_boarding_actor_turn() -> void:
 	boarding_selected_action = BOARDING_ACTION_MOVE
 	_refresh_boarding_unit_visuals()
 	game_flow.post_message("Boarding turn: %s (Round %d)." % [_unit_label(actor), boarding_round])
-	if actor.team == Unit.Team.PLAYER:
+	if actor.team == CombatTurnManager.Team.PLAYER:
 		_select_unit(actor)
 	else:
 		_take_enemy_boarding_action(actor)
 
 func _advance_boarding_turn() -> void:
-	if game_flow.tactical_type != GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type != GameLogicState.TacticalType.BOARDING:
 		return
 	_prune_boarding_initiative()
-	if game_flow.current_mode != GameFlow.Mode.TACTICAL_COMBAT:
+	if game_flow.current_mode != GameLogicState.Mode.TACTICAL_COMBAT:
 		return
 	if units.is_empty():
 		return
@@ -1163,10 +1024,10 @@ func _advance_boarding_turn() -> void:
 	_begin_boarding_actor_turn()
 
 func _end_boarding_actor_turn() -> void:
-	if game_flow.tactical_type != GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type != GameLogicState.TacticalType.BOARDING:
 		return
-	var actor: Unit = _current_boarding_actor()
-	if actor == null or actor.team != Unit.Team.PLAYER:
+	var actor: CombatUnit = _current_boarding_actor()
+	if actor == null or actor.team != CombatTurnManager.Team.PLAYER:
 		return
 	boarding_actor_moved = true
 	boarding_actor_attacked = true
@@ -1175,8 +1036,8 @@ func _end_boarding_actor_turn() -> void:
 	_advance_boarding_turn()
 
 func _prune_boarding_initiative() -> void:
-	var actor_before: Unit = _current_boarding_actor()
-	var pruned: Array[Unit] = []
+	var actor_before: CombatUnit = _current_boarding_actor()
+	var pruned: Array[CombatUnit] = []
 	for unit in boarding_initiative_order:
 		if unit != null and is_instance_valid(unit) and units.has(unit):
 			pruned.append(unit)
@@ -1189,18 +1050,18 @@ func _prune_boarding_initiative() -> void:
 		boarding_initiative_index = clampi(boarding_initiative_index, 0, boarding_initiative_order.size() - 1)
 
 func _rebuild_boarding_round_order() -> void:
-	var players: Array[Unit] = []
-	var enemies: Array[Unit] = []
+	var players: Array[CombatUnit] = []
+	var enemies: Array[CombatUnit] = []
 	for unit in boarding_initiative_order:
 		if unit == null or not is_instance_valid(unit):
 			continue
-		if unit.team == Unit.Team.PLAYER:
+		if unit.team == CombatTurnManager.Team.PLAYER:
 			players.append(unit)
 		else:
 			enemies.append(unit)
 	players.shuffle()
 	enemies.shuffle()
-	var rebuilt: Array[Unit] = []
+	var rebuilt: Array[CombatUnit] = []
 	while not players.is_empty() or not enemies.is_empty():
 		if not players.is_empty():
 			rebuilt.append(players.pop_front())
@@ -1208,16 +1069,16 @@ func _rebuild_boarding_round_order() -> void:
 			rebuilt.append(enemies.pop_front())
 	boarding_initiative_order = rebuilt
 
-func _take_enemy_boarding_action(unit: Unit) -> void:
-	if unit == null or unit.team != Unit.Team.ENEMY:
+func _take_enemy_boarding_action(unit: CombatUnit) -> void:
+	if unit == null or unit.team != CombatTurnManager.Team.ENEMY:
 		return
 	boarding_actor_moved = false
 	boarding_actor_attacked = false
-	var adjacent_target: Unit = _get_adjacent_enemy(unit)
+	var adjacent_target: CombatUnit = _get_adjacent_enemy(unit)
 	if adjacent_target != null:
 		_perform_melee_attack(unit, adjacent_target, true)
 		return
-	var ranged_target: Unit = _best_enemy_ranged_target(unit)
+	var ranged_target: CombatUnit = _best_enemy_ranged_target(unit)
 	if ranged_target != null and randf() < 0.5:
 		_perform_ranged_attack(unit, ranged_target, true)
 		if boarding_actor_attacked:
@@ -1240,8 +1101,8 @@ func _take_enemy_boarding_action(unit: Unit) -> void:
 	if not boarding_actor_attacked:
 		_advance_boarding_turn()
 
-func _best_enemy_ranged_target(unit: Unit) -> Unit:
-	var best: Unit = null
+func _best_enemy_ranged_target(unit: CombatUnit) -> CombatUnit:
+	var best: CombatUnit = null
 	var best_dist: int = 99999
 	for other in units:
 		if other.team == unit.team:
@@ -1257,15 +1118,15 @@ func _best_enemy_ranged_target(unit: Unit) -> Unit:
 	return best
 
 func _check_tactical_outcome() -> void:
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING and boarding_active:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING and boarding_active:
 		if _has_attacker_on_objective():
 			_finish_boarding_tactical(true)
 			return
 		if boarding_defender_hold_progress >= boarding_defender_hold_turns_required:
 			_finish_boarding_tactical(false)
 			return
-	var player_alive := _alive_count(Unit.Team.PLAYER)
-	var enemy_alive := _alive_count(Unit.Team.ENEMY)
+	var player_alive := _alive_count(CombatTurnManager.Team.PLAYER)
+	var enemy_alive := _alive_count(CombatTurnManager.Team.ENEMY)
 	if player_alive <= 0:
 		if boarding_active:
 			_finish_boarding_tactical(not current_boarding_is_player_attacking)
@@ -1281,16 +1142,16 @@ func _check_tactical_outcome() -> void:
 func _finish_boarding_tactical(attackers_won: bool) -> void:
 	boarding_active = false
 	_clear_selection()
-	var player_casualties: int = _boarding_crew_casualties_for_team(Unit.Team.PLAYER)
-	var enemy_casualties: int = _boarding_crew_casualties_for_team(Unit.Team.ENEMY)
+	var player_casualties: int = _boarding_crew_casualties_for_team(CombatTurnManager.Team.PLAYER)
+	var enemy_casualties: int = _boarding_crew_casualties_for_team(CombatTurnManager.Team.ENEMY)
 	ship_battle.apply_boarding_crew_casualties(player_casualties, enemy_casualties)
 	_sync_career_from_ship_battle()
 	ship_battle.resolve_boarding_result(current_boarding_is_player_attacking, attackers_won)
-	_set_mode(GameFlow.Mode.SHIP_COMBAT)
+	_set_mode(GameLogicState.Mode.SHIP_COMBAT)
 
-func _boarding_crew_casualties_for_team(team: Unit.Team) -> int:
+func _boarding_crew_casualties_for_team(team: CombatTurnManager.Team) -> int:
 	var initial: int = (
-		boarding_initial_player_boarders if team == Unit.Team.PLAYER else boarding_initial_enemy_boarders
+		boarding_initial_player_boarders if team == CombatTurnManager.Team.PLAYER else boarding_initial_enemy_boarders
 	)
 	if initial <= 0:
 		return 0
@@ -1298,7 +1159,7 @@ func _boarding_crew_casualties_for_team(team: Unit.Team) -> int:
 	if lost_units <= 0:
 		return 0
 	var crew_start: int = (
-		ship_battle.player_crew_battle_start if team == Unit.Team.PLAYER else ship_battle.enemy_crew_battle_start
+		ship_battle.player_crew_battle_start if team == CombatTurnManager.Team.PLAYER else ship_battle.enemy_crew_battle_start
 	)
 	var per_boarder: int = maxi(1, int(round(float(crew_start) / float(initial))))
 	return lost_units * per_boarder
@@ -1314,10 +1175,10 @@ func _handle_tactical_finished(player_side_successful: bool) -> void:
 		game_flow.post_message("Town assault won. Returning to Caribbean travel.")
 	else:
 		game_flow.post_message("Town assault failed. Returning to Caribbean travel.")
-	_set_mode(GameFlow.Mode.WORLD_MAP)
+	_set_mode(GameLogicState.Mode.WORLD_MAP)
 
 func _update_boarding_defender_hold_after_round() -> void:
-	if not boarding_active or game_flow.tactical_type != GameFlow.TacticalType.BOARDING:
+	if not boarding_active or game_flow.tactical_type != GameLogicState.TacticalType.BOARDING:
 		return
 	if _attackers_team_has_objective_control():
 		boarding_defender_hold_progress = 0
@@ -1329,7 +1190,7 @@ func _update_boarding_defender_hold_after_round() -> void:
 	_check_tactical_outcome()
 
 func _attackers_team_has_objective_control() -> bool:
-	var attackers_team := Unit.Team.PLAYER if current_boarding_is_player_attacking else Unit.Team.ENEMY
+	var attackers_team := CombatTurnManager.Team.PLAYER if current_boarding_is_player_attacking else CombatTurnManager.Team.ENEMY
 	for unit in units:
 		if unit.team == attackers_team and unit.cell == boarding_objective_cell:
 			return true
@@ -1338,7 +1199,7 @@ func _attackers_team_has_objective_control() -> bool:
 func _has_attacker_on_objective() -> bool:
 	return _attackers_team_has_objective_control()
 
-func _get_adjacent_enemy(unit: Unit) -> Unit:
+func _get_adjacent_enemy(unit: CombatUnit) -> CombatUnit:
 	for candidate in units:
 		if candidate.team == unit.team:
 			continue
@@ -1346,7 +1207,7 @@ func _get_adjacent_enemy(unit: Unit) -> Unit:
 			return candidate
 	return null
 
-func _best_enemy_move_cell(unit: Unit) -> Vector2i:
+func _best_enemy_move_cell(unit: CombatUnit) -> Vector2i:
 	var blocked := _blocked_cells_for(unit)
 	var reachable := Pathfinder.reachable_cells(
 		unit.cell,
@@ -1359,7 +1220,7 @@ func _best_enemy_move_cell(unit: Unit) -> Vector2i:
 
 	var targets: Array[Vector2i] = []
 	for ally in units:
-		if ally.team == Unit.Team.PLAYER:
+		if ally.team == CombatTurnManager.Team.PLAYER:
 			targets.append(ally.cell)
 	if targets.is_empty():
 		return unit.cell
@@ -1480,11 +1341,11 @@ func _manhattan(a: Vector2i, b: Vector2i) -> int:
 func _first_los_blocker(from_cell: Vector2i, to_cell: Vector2i) -> Vector2i:
 	var line_cells: Array[Vector2i] = _line_cells_between(from_cell, to_cell)
 	for cell in line_cells:
-		if game_flow.tactical_type == GameFlow.TacticalType.BOARDING and not grid.is_cell_on_deck(cell):
+		if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING and not grid.is_cell_on_deck(cell):
 			return cell
 		if boarding_obstacle_cells.has(cell):
 			return cell
-		var blocker: Unit = _get_unit_at(cell)
+		var blocker: CombatUnit = _get_unit_at(cell)
 		if blocker != null and blocker.cell != from_cell and blocker.cell != to_cell:
 			return cell
 	return Vector2i(-1, -1)
@@ -1515,7 +1376,7 @@ func _line_cells_between(from_cell: Vector2i, to_cell: Vector2i) -> Array[Vector
 
 func _cover_bonus_for(cell: Vector2i) -> int:
 	var bonus: int = 0
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING and boarding_chokepoint_cells.has(cell):
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING and boarding_chokepoint_cells.has(cell):
 		bonus += 2
 	var orthogonal: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
 	for offset in orthogonal:
@@ -1523,7 +1384,7 @@ func _cover_bonus_for(cell: Vector2i) -> int:
 			bonus += 1
 			break
 	if (
-		game_flow.tactical_type == GameFlow.TacticalType.BOARDING
+		game_flow.tactical_type == GameLogicState.TacticalType.BOARDING
 		and bonus < 2
 		and not boarding_chokepoint_cells.has(cell)
 	):
@@ -1533,11 +1394,11 @@ func _cover_bonus_for(cell: Vector2i) -> int:
 				break
 	return bonus
 
-func _unit_label(unit: Unit) -> String:
-	return "Player crew" if unit.team == Unit.Team.PLAYER else "Enemy crew"
+func _unit_label(unit: CombatUnit) -> String:
+	return "Player crew" if unit.team == CombatTurnManager.Team.PLAYER else "Enemy crew"
 
-func _team_label(team: Unit.Team) -> String:
-	return "player" if team == Unit.Team.PLAYER else "enemy"
+func _team_label(team: CombatTurnManager.Team) -> String:
+	return "player" if team == CombatTurnManager.Team.PLAYER else "enemy"
 
 func _to_vector2i_array(value: Variant) -> Array[Vector2i]:
 	var result: Array[Vector2i] = []
@@ -1548,41 +1409,6 @@ func _to_vector2i_array(value: Variant) -> Array[Vector2i]:
 		if item is Vector2i:
 			result.append(item)
 	return result
-
-func _draw_ship_cell_path_polyline(
-	grid_rect: Rect2,
-	view_origin: Vector2,
-	view_cols: int,
-	view_rows: int,
-	path: Array[Dictionary],
-	color: Color,
-	width: float
-) -> void:
-	if path.size() < 2:
-		return
-	var pts := PackedVector2Array()
-	var cc: int = ship_battle.combat_cols
-	var rr: int = ship_battle.combat_rows
-	for step in path:
-		var pos: Vector2 = step["pos"] as Vector2
-		var n := _naval_combat_cell_pos_to_screen_norm(pos, cc, rr)
-		pts.append(_combat_to_screen(n, grid_rect, cc, rr, view_origin, view_cols, view_rows))
-	draw_polyline(pts, color, width)
-
-func _draw_ship_footprint_cells(
-	grid_rect: Rect2,
-	view_origin: Vector2,
-	view_cols: int,
-	view_rows: int,
-	cells: Array[Vector2i],
-	color: Color
-) -> void:
-	for cell in cells:
-		var rect: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
-		if not rect.intersects(grid_rect.grow(2.0)):
-			continue
-		draw_rect(rect, color, true)
-		draw_rect(rect, Color(color.r, color.g, color.b, minf(0.85, color.a + 0.28)), false, 1.0)
 
 func _gun_reload_hud_token(turns_remaining: int) -> String:
 	return "●" if turns_remaining <= 0 else str(turns_remaining)
@@ -1596,84 +1422,6 @@ func _gun_port_color_from_reload(reload_turns: int, alpha_scale: float) -> Color
 	var t: float = clampf(float(reload_turns) / cap, 0.12, 1.0)
 	return Color(0.92, 0.34 + 0.22 * t, 0.2, (0.48 + 0.44 * t) * a)
 
-
-func _draw_ship_silhouette(
-	center: Vector2,
-	ship_class: String,
-	heading_deg: float,
-	hull_color: Color,
-	cell_size: float = 0.0,
-	alpha_mult: float = 1.0,
-	port_reload_turns: int = -1,
-	starboard_reload_turns: int = -1
-) -> void:
-	var length_cells: float = float(ship_battle.get_ship_length_cells(ship_class))
-	var width_cells: float = float(ship_battle.get_ship_width_cells(ship_class))
-	var draw_scale: float = _ship_draw_scale(ship_class)
-	var hull_length: float = 260.0 * draw_scale
-	var hull_beam: float = 48.0 * draw_scale
-	if cell_size > 0.0:
-		hull_length = maxf(length_cells * cell_size, 36.0)
-		hull_beam = maxf(width_cells * cell_size, 12.0)
-	var am: float = clampf(alpha_mult, 0.0, 1.0)
-	var hull_fill: Color = Color(hull_color.r, hull_color.g, hull_color.b, hull_color.a * am)
-	var heading_rad: float = deg_to_rad(90.0 - heading_deg)
-	var basis := Transform2D(heading_rad, center)
-	var half_length: float = hull_length * 0.5
-	var half_beam: float = hull_beam * 0.5
-	# Local -Y = port (left), +Y = starboard (right); matches _battery_beam_direction.
-	var port_beam_offset: float = -half_beam * 0.46
-	var starboard_beam_offset: float = half_beam * 0.46
-	var hull_local := PackedVector2Array([
-		Vector2(-half_length, half_beam * 0.42),
-		Vector2(-half_length * 0.55, -half_beam * 0.62),
-		Vector2(half_length * 0.42, -half_beam * 0.72),
-		Vector2(half_length, 0.0),
-		Vector2(half_length * 0.42, half_beam * 0.72),
-		Vector2(-half_length * 0.72, half_beam * 0.62)
-	])
-	var hull := PackedVector2Array()
-	for p in hull_local:
-		hull.append(basis * p)
-	draw_colored_polygon(hull, hull_fill)
-	draw_polyline(hull, Color(0.18, 0.12, 0.07, 0.55 * am + 0.15 * (1.0 - am)), 2.0, true)
-
-	var sail_color := Color(0.9, 0.89, 0.82, 0.9 * am)
-	if ship_class == "Sloop":
-		var mast_x: float = -half_length * 0.08
-		var mast_height: float = maxf(hull_beam * 3.0, 38.0 * draw_scale)
-		draw_line(basis * Vector2(mast_x, half_beam * 0.2), basis * Vector2(mast_x, -mast_height), Color(0.86, 0.8, 0.65, 0.55 + 0.45 * am), 3.0)
-		var main_sail := PackedVector2Array([
-			basis * Vector2(mast_x, -mast_height * 0.88),
-			basis * Vector2(mast_x + half_length * 0.58, -mast_height * 0.42),
-			basis * Vector2(mast_x, -half_beam * 0.35)
-		])
-		var jib := PackedVector2Array([
-			basis * Vector2(mast_x + half_length * 0.08, -mast_height * 0.48),
-			basis * Vector2(half_length * 0.88, -half_beam * 0.12),
-			basis * Vector2(mast_x + half_length * 0.08, -half_beam * 0.38)
-		])
-		draw_colored_polygon(main_sail, sail_color)
-		draw_colored_polygon(jib, Color(0.92, 0.91, 0.84, 0.86 * am))
-	else:
-		var mast1_x: float = -half_length * 0.18
-		var mast2_x: float = half_length * 0.18
-		var mast_height_1: float = maxf(hull_beam * 3.0, 42.0 * draw_scale)
-		var mast_height_2: float = maxf(hull_beam * 2.4, 34.0 * draw_scale)
-		draw_line(basis * Vector2(mast1_x, half_beam * 0.35), basis * Vector2(mast1_x, -mast_height_1), Color(0.86, 0.8, 0.65, 0.55 + 0.45 * am), 3.0)
-		draw_line(basis * Vector2(mast2_x, half_beam * 0.35), basis * Vector2(mast2_x, -mast_height_2), Color(0.86, 0.8, 0.65, 0.55 + 0.45 * am), 3.0)
-		var fore_sail := PackedVector2Array([
-			basis * Vector2(mast2_x, -mast_height_2 * 0.9),
-			basis * Vector2(mast2_x + half_length * 0.28, -mast_height_2 * 0.42),
-			basis * Vector2(mast2_x, -half_beam * 0.45)
-		])
-		var main_sail := PackedVector2Array([
-			basis * Vector2(mast1_x, -mast_height_1 * 0.9),
-			basis * Vector2(mast1_x + half_length * 0.38, -mast_height_1 * 0.48),
-			basis * Vector2(mast1_x, -half_beam * 0.45)
-		])
-		draw_colored_polygon(fore_sail, sail_color)
-		draw_colored_polygon(main_sail, sail_color)
 
 func _ship_combat_merge_cells_dict(into: Dictionary, cells: Array[Vector2i]) -> void:
 	for c in cells:
@@ -1689,21 +1437,6 @@ func _naval_cell_center_screen(
 	var rect: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
 	return rect.position + rect.size * 0.5
 
-func _draw_heading_chevron(center: Vector2, heading_idx: int, size: float, color: Color) -> void:
-	var dir: Vector2 = _naval_heading_vector(heading_idx)
-	var tip: Vector2 = center + dir * size
-	var wing: Vector2 = Vector2(-dir.y, dir.x) * size * 0.52
-	var base: Vector2 = center - dir * size * 0.22
-	draw_colored_polygon(
-		PackedVector2Array([tip, base + wing, base - wing]),
-		color
-	)
-
-func _draw_heading_tick(center: Vector2, heading_idx: int, radius: float, color: Color) -> void:
-	var dir: Vector2 = _naval_heading_vector(heading_idx)
-	var tick_center: Vector2 = center + dir * radius
-	_draw_heading_chevron(tick_center, heading_idx, radius * 0.38, color)
-
 func _ship_combat_camera_anchor_cells() -> Array[Vector2i]:
 	var seen: Dictionary = {}
 	var pp: Vector2 = ship_battle.get_player_display_cell_pos()
@@ -1712,7 +1445,7 @@ func _ship_combat_camera_anchor_cells() -> Array[Vector2i]:
 	var eh: float = ship_battle.get_enemy_display_heading_deg()
 	_ship_combat_merge_cells_dict(seen, ship_battle.get_player_occupied_cells_for_pose(pp, ph))
 	_ship_combat_merge_cells_dict(seen, ship_battle.get_enemy_occupied_cells_for_pose(ep, eh))
-	if ship_battle.phase == ShipBattle.Phase.PLANNING and ship_battle.is_player_movement_plotted():
+	if ship_battle.phase == LegacyShipBattle.Phase.PLANNING and ship_battle.is_player_movement_plotted():
 		_ship_combat_merge_cells_dict(seen, ship_battle.get_player_planned_occupied_cells())
 	var out: Array[Vector2i] = []
 	for k in seen.keys():
@@ -1769,20 +1502,25 @@ func _naval_combat_cell_pos_to_screen_norm(cell_pos: Vector2, cols: int, rows: i
 
 func _naval_cell_center_from_float(cell_pos: Vector2, grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> Vector2:
 	var cell_w: float = grid_rect.size.x / float(max(1, view_cols))
-	var cell_h: float = grid_rect.size.y / float(max(1, view_rows))
+	var cell_h: float = grid_rect.size.y / float(max(1, view_rows)) * 0.5
 	var rx: float = cell_pos.x - view_origin.x
 	var ry: float = cell_pos.y - view_origin.y
-	return Vector2(grid_rect.position.x + rx * cell_w, grid_rect.position.y + ry * cell_h)
+	
+	# Diamond isometric projection:
+	# Horizontal axis is X - Y, Vertical axis is X + Y
+	var ox: float = grid_rect.position.x + grid_rect.size.x * 0.5
+	var oy: float = grid_rect.position.y
+	
+	var screen_x: float = ox + (rx - ry) * (cell_w * 0.5)
+	var screen_y: float = oy + (rx + ry) * (cell_h * 0.5)
+	
+	return Vector2(screen_x, screen_y)
 
 func _naval_cell_rect(grid_rect: Rect2, cell: Vector2i, view_origin: Vector2, view_cols: int, view_rows: int) -> Rect2:
+	var center: Vector2 = _naval_cell_center_from_float(Vector2(cell) + Vector2(0.5, 0.5), grid_rect, view_origin, view_cols, view_rows)
 	var cell_w: float = grid_rect.size.x / float(max(1, view_cols))
-	var cell_h: float = grid_rect.size.y / float(max(1, view_rows))
-	var rx: float = float(cell.x) - view_origin.x
-	var ry: float = float(cell.y) - view_origin.y
-	return Rect2(
-		Vector2(grid_rect.position.x + rx * cell_w, grid_rect.position.y + ry * cell_h),
-		Vector2(cell_w, cell_h)
-	)
+	var cell_h: float = grid_rect.size.y / float(max(1, view_rows)) * 0.5
+	return Rect2(center - Vector2(cell_w, cell_h) * 0.5, Vector2(cell_w, cell_h))
 
 func _combat_to_screen(
 	point: Vector2, combat_rect: Rect2, cols: int, rows: int, view_origin: Vector2, view_cols: int, view_rows: int
@@ -1889,126 +1627,12 @@ func _draw_naval_battlefield_grid(
 	if battlefield_rect.intersects(clip):
 		draw_rect(battlefield_rect, Color(0.9, 0.97, 1.0, 0.4), false, 2.0)
 
-func _draw_naval_reachable_cell_grid(
-	grid_rect: Rect2,
-	view_origin: Vector2,
-	view_cols: int,
-	view_rows: int,
-	cells: Array[Vector2i]
-) -> void:
-	if view_cols <= 1 or view_rows <= 1:
-		return
-	var cell_w: float = grid_rect.size.x / float(max(1, view_cols))
-	var cell_h: float = grid_rect.size.y / float(max(1, view_rows))
-	for c in cells:
-		if c.x < int(view_origin.x) or c.y < int(view_origin.y):
-			continue
-		if c.x >= int(view_origin.x) + view_cols or c.y >= int(view_origin.y) + view_rows:
-			continue
-		var cell_rect: Rect2 = _naval_cell_rect(grid_rect, c, view_origin, view_cols, view_rows)
-		if not cell_rect.intersects(grid_rect.grow(1.0)):
-			continue
-		var major: bool = c.x % 4 == 0 or c.y % 4 == 0
-		var border_color: Color = Color(0.82, 0.94, 1.0, 0.26) if major else Color(0.72, 0.86, 0.95, 0.17)
-		draw_rect(cell_rect, border_color, false, 1.0)
-	var border_rect: Rect2 = Rect2(grid_rect.position, Vector2(float(view_cols) * cell_w, float(view_rows) * cell_h))
-	if border_rect.intersects(grid_rect.grow(1.0)):
-		draw_rect(border_rect, Color(0.9, 0.97, 1.0, 0.35), false, 2.0)
-
-func _draw_ship_hazards(grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> void:
-	var hazards: Array[Vector2i] = ship_battle.get_hazard_cells()
-	for cell in hazards:
-		var rect: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
-		if not rect.intersects(grid_rect.grow(2.0)):
-			continue
-		draw_rect(rect, Color(0.74, 0.28, 0.22, 0.3), true)
-		draw_rect(rect, Color(0.92, 0.45, 0.35, 0.75), false, 1.0)
-
 func _sail_preview_max_cheb_current() -> int:
 	var hints: Dictionary = ship_battle.get_sail_movement_hints()
 	var cur: int = int(ship_battle.player_sail_setting)
 	if hints.has(cur):
 		return int(hints[cur].get("max_chebyshev", 0))
 	return 0
-
-func _draw_ship_action_panel(panel_rect: Rect2) -> void:
-	draw_rect(panel_rect, Color(0.03, 0.07, 0.11, 0.82), true)
-	draw_rect(panel_rect, Color(0.66, 0.8, 0.92, 0.42), false, 1.5)
-	var sail_names: PackedStringArray = ["Slow", "Battle", "Full"]
-	for si in range(3):
-		var r: Rect2 = _ship_sail_button_rect(panel_rect, si)
-		var sel: bool = int(ship_battle.player_ordered_sail_setting) == si
-		_draw_ship_action_button(r, sail_names[si], sel, true, true)
-	draw_string(
-		ThemeDB.fallback_font,
-		panel_rect.position + Vector2(14.0, SHIP_COMBAT_CANNON_RANGE_LABEL_Y),
-		"Cannon Range",
-		HORIZONTAL_ALIGNMENT_LEFT,
-		-1,
-		12
-	)
-
-	var port_rect := _ship_fire_battery_button_rect(panel_rect, true)
-	var starboard_rect := _ship_fire_battery_button_rect(panel_rect, false)
-	var fire_cannons_rect := _ship_action_button_rect(panel_rect, SHIP_ACTION_FIRE_CANNONS)
-	var board_rect := _ship_action_button_rect(panel_rect, SHIP_ACTION_BOARD)
-	var disengage_rect := _ship_action_button_rect(panel_rect, SHIP_ACTION_DISENGAGE)
-	var end_turn_rect := _ship_action_button_rect(panel_rect, SHIP_ACTION_END_TURN)
-	_draw_ship_action_button(
-		port_rect,
-		"Port",
-		ship_combat_range_highlight == 0,
-		true,
-		true
-	)
-	_draw_ship_action_button(
-		starboard_rect,
-		"Starboard",
-		ship_combat_range_highlight == 1,
-		true,
-		true
-	)
-	var can_fire_cannons: bool = (
-		ship_combat_range_highlight >= 0
-		and ship_battle.player_can_order_battery_fire(ship_combat_range_highlight)
-	)
-	_draw_ship_action_button(fire_cannons_rect, "Fire Cannons", false, can_fire_cannons)
-	var board_label: String = "Grapple Now" if ship_battle.can_player_board_now() else "Grapple Order"
-	_draw_ship_action_button(
-		board_rect,
-		board_label,
-		ship_battle.player_plan_board,
-		true
-	)
-	_draw_ship_action_button(
-		disengage_rect,
-		"Break off",
-		false,
-		ship_battle.can_player_disengage()
-	)
-	var can_end_turn: bool = ship_battle.can_player_end_turn()
-	_draw_ship_action_button(end_turn_rect, "End Your Turn", false, can_end_turn)
-
-func _draw_ship_action_button(
-	button_rect: Rect2,
-	text: String,
-	selected: bool,
-	enabled: bool = true,
-	center_text: bool = false
-) -> void:
-	var bg: Color = Color(0.2, 0.36, 0.52, 0.8) if selected else Color(0.1, 0.2, 0.3, 0.8)
-	var border: Color = Color(0.85, 0.95, 1.0, 0.9) if selected else Color(0.62, 0.78, 0.9, 0.45)
-	var text_color: Color = Color(1, 1, 1, 1)
-	if not enabled:
-		bg = Color(0.08, 0.12, 0.16, 0.75)
-		border = Color(0.45, 0.55, 0.62, 0.35)
-		text_color = Color(0.72, 0.76, 0.8, 0.6)
-	draw_rect(button_rect, bg, true)
-	draw_rect(button_rect, border, false, 2.0)
-	var align: HorizontalAlignment = HORIZONTAL_ALIGNMENT_CENTER if center_text else HORIZONTAL_ALIGNMENT_LEFT
-	var text_x: float = 0.0 if center_text else 12.0
-	var text_w: float = button_rect.size.x if center_text else -1.0
-	draw_string(ThemeDB.fallback_font, button_rect.position + Vector2(text_x, 23.0), text, align, text_w, 16, text_color)
 
 func _ship_action_button_rect(panel_rect: Rect2, action_id: int) -> Rect2:
 	var idx: int = 0
@@ -2041,25 +1665,6 @@ func _ship_sail_button_rect(panel_rect: Rect2, sail_idx: int) -> Rect2:
 	var y0: float = panel_rect.position.y + SHIP_COMBAT_SAIL_ROW_Y
 	return Rect2(x0, y0, w, 42.0)
 
-func _draw_boarding_action_panel(panel_rect: Rect2) -> void:
-	draw_rect(panel_rect, Color(0.03, 0.07, 0.11, 0.84), true)
-	draw_rect(panel_rect, Color(0.66, 0.8, 0.92, 0.42), false, 1.5)
-	draw_string(ThemeDB.fallback_font, panel_rect.position + Vector2(14.0, 24.0), "Crew Actions", HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
-	var move_rect := _boarding_action_button_rect(panel_rect, BOARDING_ACTION_MOVE)
-	var ranged_rect := _boarding_action_button_rect(panel_rect, BOARDING_ACTION_RANGED)
-	var melee_rect := _boarding_action_button_rect(panel_rect, BOARDING_ACTION_MELEE)
-	var end_turn_rect := _boarding_end_turn_button_rect(panel_rect)
-	_draw_ship_action_button(move_rect, "Move", boarding_selected_action == BOARDING_ACTION_MOVE, true)
-	_draw_ship_action_button(ranged_rect, "Ranged Attack", boarding_selected_action == BOARDING_ACTION_RANGED, true)
-	_draw_ship_action_button(melee_rect, "Melee Attack", boarding_selected_action == BOARDING_ACTION_MELEE, true)
-	_draw_ship_action_button(end_turn_rect, "End Turn", false, true)
-	var actor: Unit = _current_boarding_actor()
-	var actor_text: String = "Current: -"
-	if actor != null:
-		actor_text = "Current: %s" % _unit_label(actor)
-	draw_string(ThemeDB.fallback_font, panel_rect.position + Vector2(12.0, panel_rect.size.y - 54.0), actor_text, HORIZONTAL_ALIGNMENT_LEFT, panel_rect.size.x - 24.0, 14)
-	draw_string(ThemeDB.fallback_font, panel_rect.position + Vector2(12.0, panel_rect.size.y - 32.0), "Round %d" % boarding_round, HORIZONTAL_ALIGNMENT_LEFT, panel_rect.size.x - 24.0, 14)
-
 func _boarding_action_panel_rect() -> Rect2:
 	var viewport_size: Vector2 = get_viewport_rect().size
 	var metrics: Dictionary = _ui_metrics(viewport_size)
@@ -2080,12 +1685,12 @@ func _boarding_end_turn_button_rect(panel_rect: Rect2) -> Rect2:
 		Vector2(panel_rect.size.x - 24.0, 36.0)
 	)
 
-func _draw_boarding_deck_surface() -> void:
+func _draw_boarding_deck_surface(ci: CanvasItem) -> void:
 	if grid == null:
 		return
 	var tile := float(grid.tile_size)
 	var board_rect := Rect2(grid.position, Vector2(float(grid.width) * tile, float(grid.height) * tile))
-	draw_rect(board_rect, Color(0.04, 0.08, 0.12, 1.0), true)
+	ci.draw_rect(board_rect, Color(0.04, 0.08, 0.12, 1.0), true)
 
 	var deck_cells: Array[Vector2i] = boarding_deck_cells
 	if deck_cells.is_empty():
@@ -2095,151 +1700,61 @@ func _draw_boarding_deck_surface() -> void:
 
 	for cell in deck_cells:
 		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
-		draw_rect(cell_rect, Color(0.2, 0.16, 0.1), true)
+		ci.draw_rect(cell_rect, Color(0.2, 0.16, 0.1), true)
 
 	for cell in boarding_chokepoint_cells:
 		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
-		draw_rect(cell_rect, Color(0.4, 0.28, 0.16, 0.5), true)
+		ci.draw_rect(cell_rect, Color(0.4, 0.28, 0.16, 0.5), true)
 
 	for cell in boarding_gangplank_cells:
 		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
-		draw_rect(cell_rect, Color(0.62, 0.47, 0.28, 0.75), true)
+		ci.draw_rect(cell_rect, Color(0.62, 0.47, 0.28, 0.75), true)
 
 	var objective_rect := Rect2(grid.position + Vector2(boarding_objective_cell) * tile, Vector2.ONE * tile)
-	draw_rect(objective_rect, Color(0.95, 0.8, 0.35, 0.8), true)
+	ci.draw_rect(objective_rect, Color(0.95, 0.8, 0.35, 0.8), true)
 
 	for cell in boarding_obstacle_cells:
 		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
-		draw_rect(cell_rect, Color(0.2, 0.17, 0.12, 0.95), true)
+		ci.draw_rect(cell_rect, Color(0.2, 0.17, 0.12, 0.95), true)
 
 	for cell in reachable_cells:
 		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
-		draw_rect(cell_rect, Color(0.3, 0.65, 1.0, 0.25), true)
+		ci.draw_rect(cell_rect, Color(0.3, 0.65, 1.0, 0.25), true)
 
 	if grid.is_in_bounds(grid.hovered_cell) and grid.is_cell_on_deck(grid.hovered_cell):
 		var hover_rect := Rect2(grid.position + Vector2(grid.hovered_cell) * tile, Vector2.ONE * tile)
-		draw_rect(hover_rect, Color(1.0, 1.0, 1.0, 0.15), true)
+		ci.draw_rect(hover_rect, Color(1.0, 1.0, 1.0, 0.15), true)
 
 	for cell in deck_cells:
 		var cell_rect := Rect2(grid.position + Vector2(cell) * tile, Vector2.ONE * tile)
-		draw_rect(cell_rect, Color(0.28, 0.3, 0.36), false, 1.0)
+		ci.draw_rect(cell_rect, Color(0.28, 0.3, 0.36), false, 1.0)
 
-func _draw_boarding_units_overlay() -> void:
+func _draw_boarding_units_overlay(ci: CanvasItem) -> void:
 	if grid == null:
 		return
 	var tile := float(grid.tile_size)
-	var actor: Unit = _current_boarding_actor()
+	var actor: CombatUnit = _current_boarding_actor()
 	for unit in units:
 		if unit == null or not is_instance_valid(unit):
 			continue
 		var center := grid.position + Vector2(unit.cell) * tile + Vector2.ONE * tile * 0.5
 		var radius := tile * 0.34
-		var base_color := Color(0.35, 0.65, 1.0) if unit.team == Unit.Team.PLAYER else Color(1.0, 0.4, 0.35)
-		draw_circle(center, radius, base_color)
-		draw_string(ThemeDB.fallback_font, center + Vector2(-6.0, 6.0), str(unit.hp), HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
+		var base_color := Color(0.35, 0.65, 1.0) if unit.team == CombatTurnManager.Team.PLAYER else Color(1.0, 0.4, 0.35)
+		ci.draw_circle(center, radius, base_color)
+		ci.draw_string(ThemeDB.fallback_font, center + Vector2(-6.0, 6.0), str(unit.hp), HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
 		if unit == selected_unit:
-			draw_arc(center, radius + 4.0, 0.0, TAU, 32, Color(1.0, 1.0, 0.5), 3.0)
+			ci.draw_arc(center, radius + 4.0, 0.0, TAU, 32, Color(1.0, 1.0, 0.5), 3.0)
 		if unit == actor:
-			draw_arc(center, radius + 8.0, 0.0, TAU, 40, Color(1.0, 0.92, 0.45, 0.95), 3.0)
+			ci.draw_arc(center, radius + 8.0, 0.0, TAU, 40, Color(1.0, 0.92, 0.45, 0.95), 3.0)
 		if unit.has_acted:
-			draw_circle(center, radius, Color(0.0, 0.0, 0.0, 0.4))
+			ci.draw_circle(center, radius, Color(0.0, 0.0, 0.0, 0.4))
 		if unit.is_dimmed:
-			draw_circle(center, radius + 1.0, Color(0.02, 0.03, 0.06, 0.55))
-
-func _draw_ship_movement_preview(grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> void:
-	if game_flow.current_mode != GameFlow.Mode.SHIP_COMBAT:
-		return
-	if ship_battle.phase != ShipBattle.Phase.PLANNING:
-		return
-	for opt in ship_battle.get_player_display_move_options():
-		if not (opt is Dictionary):
-			continue
-		var cell: Vector2i = opt.get("cell", Vector2i(-1, -1))
-		var heading_idx: int = int(opt.get("heading_idx", -1))
-		if cell.x < 0 or heading_idx < 0:
-			continue
-		var r: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
-		if not r.intersects(grid_rect.grow(1.0)):
-			continue
-		var selected_here: bool = cell == ship_move_selected_cell
-		draw_rect(r, Color(0.34, 0.7, 0.95, 0.3), true)
-		draw_rect(r, Color(0.72, 0.9, 1.0, 0.45), false, 1.0)
-		var center: Vector2 = r.position + r.size * 0.5
-		var chevron_size: float = minf(r.size.x, r.size.y) * 0.4
-		var sel: bool = selected_here and heading_idx == ship_move_selected_heading_idx
-		var color: Color = Color(0.95, 0.98, 1.0, 0.95) if sel else Color(0.78, 0.92, 1.0, 0.85)
-		_draw_heading_chevron(center, heading_idx, chevron_size, color)
-
-	_draw_selected_ship_move_cell(grid_rect, view_origin, view_cols, view_rows)
-
-func _draw_ship_gun_range_overlay(
-	grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int, battery: int
-) -> void:
-	if game_flow.current_mode != GameFlow.Mode.SHIP_COMBAT:
-		return
-	if ship_battle.phase != ShipBattle.Phase.PLANNING:
-		return
-	var cell_w: float = grid_rect.size.x / float(max(1, view_cols))
-	var cell_h: float = grid_rect.size.y / float(max(1, view_rows))
-	var cell_px: float = (cell_w + cell_h) * 0.5
-	var yd_per_cell: float = ship_battle.get_combat_cell_yards()
-	var ship_norm: Vector2 = _naval_combat_cell_pos_to_screen_norm(
-		ship_battle.player_cell_pos, ship_battle.combat_cols, ship_battle.combat_rows
-	)
-	var ship_center: Vector2 = _combat_to_screen(
-		ship_norm, grid_rect, ship_battle.combat_cols, ship_battle.combat_rows, view_origin, view_cols, view_rows
-	)
-	var overlay: Array = ship_battle.get_player_gun_range_overlay_cells(
-		battery, view_origin, view_cols, view_rows
-	)
-	for e in overlay:
-		if not (e is Dictionary):
-			continue
-		var d: Dictionary = e
-		var cell: Vector2i = d["cell"] as Vector2i
-		var band: int = int(d.get("band", 0))
-		var fill: Color = Color(0.55, 0.38, 0.92, 0.07)
-		match band:
-			3:
-				fill = Color(0.32, 0.88, 0.52, 0.14)
-			2:
-				fill = Color(0.88, 0.82, 0.38, 0.12)
-			1:
-				fill = Color(0.92, 0.58, 0.32, 0.10)
-		var rect: Rect2 = _naval_cell_rect(grid_rect, cell, view_origin, view_cols, view_rows)
-		draw_rect(rect, fill, true)
-	var ring_cols: Array[Color] = [
-		Color(0.45, 0.95, 0.62, 0.55),
-		Color(0.95, 0.88, 0.42, 0.5),
-		Color(0.98, 0.62, 0.35, 0.48)
-	]
-	var ring_thresholds: Array[float] = [0.75, 0.50, 0.25]
-	for ri in range(ring_thresholds.size()):
-		var ring_y: float = ship_battle.get_player_cannon_accuracy_ring_yards(ring_thresholds[ri])
-		if ring_y < 12.0:
-			continue
-		var rad: float = (ring_y / yd_per_cell) * cell_px
-		draw_arc(ship_center, rad, 0.0, TAU, 80, ring_cols[ri], 1.75, true)
-	var enemy_rect: Rect2 = _naval_cell_rect(grid_rect, ship_battle.enemy_cell, view_origin, view_cols, view_rows)
-	if ship_battle.enemy_in_player_battery_range(battery):
-		draw_rect(enemy_rect, Color(1.0, 0.45, 0.28, 0.22), true)
-		draw_rect(enemy_rect, Color(1.0, 0.82, 0.65, 0.75), false, 2.0)
-
-func _draw_selected_ship_move_cell(grid_rect: Rect2, view_origin: Vector2, view_cols: int, view_rows: int) -> void:
-	if ship_move_selected_cell.x < 0 or ship_move_selected_cell.y < 0:
-		return
-	if ship_move_selected_heading_idx < 0:
-		return
-	if not ship_battle.can_player_move_to_option(ship_move_selected_cell, ship_move_selected_heading_idx):
-		return
-	var rect: Rect2 = _naval_cell_rect(grid_rect, ship_move_selected_cell, view_origin, view_cols, view_rows)
-	draw_rect(rect, Color(1.0, 0.96, 0.55, 0.16), true)
-	draw_rect(rect, Color(1.0, 0.96, 0.55, 0.9), false, 2.0)
+			ci.draw_circle(center, radius + 1.0, Color(0.02, 0.03, 0.06, 0.55))
 
 func _sidebar_compass_invalidate_key() -> String:
 	var wind: Dictionary = _get_sidebar_compass_wind()
 	var month_key: String = ""
-	if game_flow.current_mode == GameFlow.Mode.WORLD_MAP:
+	if game_flow.current_mode == GameLogicState.Mode.WORLD_MAP:
 		month_key = ":%d-%02d" % [world_map.game_year, world_map.game_month]
 	return "%d%s:%.2f:%.2f" % [
 		int(game_flow.current_mode),
@@ -2250,9 +1765,9 @@ func _sidebar_compass_invalidate_key() -> String:
 
 func _get_sidebar_compass_wind() -> Dictionary:
 	match game_flow.current_mode:
-		GameFlow.Mode.SHIP_COMBAT:
+		GameLogicState.Mode.SHIP_COMBAT:
 			return {"direction_deg": ship_battle.wind_direction_deg, "speed_m_s": ship_battle.wind_speed_m_s}
-		GameFlow.Mode.WORLD_MAP:
+		GameLogicState.Mode.WORLD_MAP:
 			return world_map.get_current_wind()
 		_:
 			return {"direction_deg": 90.0, "speed_m_s": 6.0}
@@ -2313,7 +1828,7 @@ func _draw_wind_compass_on(
 	)
 
 func _sync_ship_move_selection() -> void:
-	if ship_battle.phase != ShipBattle.Phase.PLANNING:
+	if ship_battle.phase != LegacyShipBattle.Phase.PLANNING:
 		return
 	var options: Array[Dictionary] = ship_battle.get_player_move_options()
 	if options.is_empty():
@@ -2327,9 +1842,9 @@ func _sync_ship_move_selection() -> void:
 	ship_move_selected_heading_idx = int(first.get("heading_idx", -1))
 
 func _move_ship_selection(direction: Vector2i) -> void:
-	if game_flow.current_mode != GameFlow.Mode.SHIP_COMBAT:
+	if game_flow.current_mode != GameLogicState.Mode.SHIP_COMBAT:
 		return
-	if ship_battle.phase != ShipBattle.Phase.PLANNING:
+	if ship_battle.phase != LegacyShipBattle.Phase.PLANNING:
 		return
 	_sync_ship_move_selection()
 	if ship_move_selected_cell.x < 0 or ship_move_selected_heading_idx < 0:
@@ -2371,7 +1886,7 @@ func _pick_move_option_from_click(clicked_cell: Vector2i) -> Dictionary:
 	return options[0]
 
 func _confirm_ship_move_selection() -> void:
-	if game_flow.current_mode != GameFlow.Mode.SHIP_COMBAT:
+	if game_flow.current_mode != GameLogicState.Mode.SHIP_COMBAT:
 		return
 	_sync_ship_move_selection()
 	if ship_move_selected_cell.x < 0 or ship_move_selected_heading_idx < 0:
@@ -2428,9 +1943,25 @@ func _handle_ship_combat_click(screen_pos: Vector2) -> void:
 	if not grid_rect.has_point(screen_pos):
 		return
 	var cell_w: float = grid_rect.size.x / float(nav_vc)
-	var cell_h: float = grid_rect.size.y / float(nav_vr)
-	var col_f: float = nav_view_origin.x + (screen_pos.x - grid_rect.position.x) / cell_w
-	var row_f: float = nav_view_origin.y + (screen_pos.y - grid_rect.position.y) / cell_h
+	var cell_h: float = grid_rect.size.y / float(nav_vr) * 0.5
+	
+	var lx: float = screen_pos.x - (grid_rect.position.x + grid_rect.size.x * 0.5)
+	var ly: float = screen_pos.y - (grid_rect.position.y + grid_rect.size.y * 0.25)
+	
+	# Reverse diamond projection:
+	# lx = (rx - ry) * (cell_w * 0.5)
+	# ly = (rx + ry) * (cell_h * 0.5)
+	# rx - ry = lx / (cell_w * 0.5) => A
+	# rx + ry = ly / (cell_h * 0.5) => B
+	# 2*rx = A + B => rx = (A + B) / 2
+	# 2*ry = B - A => ry = (B - A) / 2
+	var a: float = lx / (cell_w * 0.5)
+	var b: float = ly / (cell_h * 0.5)
+	var rx: float = (a + b) * 0.5
+	var ry: float = (b - a) * 0.5
+	
+	var col_f: float = nav_view_origin.x + rx
+	var row_f: float = nav_view_origin.y + ry
 	var col: int = clampi(int(floor(col_f)), 0, ship_battle.combat_cols - 1)
 	var row: int = clampi(int(floor(row_f)), 0, ship_battle.combat_rows - 1)
 	var clicked: Vector2i = Vector2i(col, row)
@@ -2604,7 +2135,7 @@ func _open_main_map_info(title: String, body: String, close_label: String = "Clo
 	main_map_info_text_label.text = body
 	if main_map_info_close_button != null:
 		main_map_info_close_button.text = close_label
-	main_map_info_layer.visible = game_flow.current_mode == GameFlow.Mode.WORLD_MAP
+	main_map_info_layer.visible = game_flow.current_mode == GameLogicState.Mode.WORLD_MAP
 	_layout_worldmap_ui()
 
 func _close_main_map_info() -> void:
@@ -2689,10 +2220,10 @@ func _setup_port_menu_ui() -> void:
 	port_menu_layer.visible = false
 	add_child(port_menu_layer)
 
-	var overlay := ColorRect.new()
-	overlay.color = Color(0.0, 0.0, 0.0, 0.62)
-	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
-	port_menu_layer.add_child(overlay)
+	port_menu_overlay = ColorRect.new()
+	port_menu_overlay.color = Color(0.0, 0.0, 0.0, 0.62)
+	port_menu_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	port_menu_layer.add_child(port_menu_overlay)
 
 	port_menu_panel = PanelContainer.new()
 	port_menu_panel.focus_mode = Control.FOCUS_NONE
@@ -2926,7 +2457,7 @@ func _open_port_arrival_menu(port_name: String) -> void:
 	port_trade_panel.visible = false
 	port_hire_panel.visible = false
 
-	port_menu_layer.visible = game_flow.current_mode == GameFlow.Mode.WORLD_MAP
+	port_menu_layer.visible = game_flow.current_mode == GameLogicState.Mode.WORLD_MAP
 	_layout_worldmap_ui()
 
 func _open_port_docked_menu(port_name: String) -> void:
@@ -2958,7 +2489,7 @@ func _open_port_docked_menu(port_name: String) -> void:
 	port_trade_panel.visible = false
 	port_hire_panel.visible = false
 
-	port_menu_layer.visible = game_flow.current_mode == GameFlow.Mode.WORLD_MAP
+	port_menu_layer.visible = game_flow.current_mode == GameLogicState.Mode.WORLD_MAP
 	_layout_worldmap_ui()
 	_try_complete_governor_mission_on_docked(port_name)
 
@@ -3526,9 +3057,9 @@ func _setup_main_menu_ui() -> void:
 	main_menu_layer.layer = 120
 	add_child(main_menu_layer)
 
-	var overlay := ColorRect.new()
-	overlay.color = Color(0.01, 0.02, 0.04, 0.96)
-	main_menu_layer.add_child(overlay)
+	main_menu_overlay = ColorRect.new()
+	main_menu_overlay.color = Color(0.01, 0.02, 0.04, 0.96)
+	main_menu_layer.add_child(main_menu_overlay)
 
 	main_menu_panel = PanelContainer.new()
 	main_menu_layer.add_child(main_menu_panel)
@@ -3688,35 +3219,31 @@ func _on_encounter_engage_pressed() -> void:
 func _on_main_menu_start_pressed() -> void:
 	_begin_gameplay_from_main_menu()
 	_reset_port_economy_state()
-	_set_mode(GameFlow.Mode.WORLD_MAP)
+	_set_mode(GameLogicState.Mode.WORLD_MAP)
 	_on_mode_changed(game_flow.current_mode)
 	_layout_worldmap_ui()
 	game_flow.post_message("World map ready. Click a port to auto-sail.")
 
 func _on_main_menu_dev_ship_combat_pressed() -> void:
 	_begin_gameplay_from_main_menu()
-	var context: Dictionary = _ship_battle_context({
-		"player_ship_class": world_map.ship_class,
-		"enemy_ship_class": _roll_enemy_ship_class(),
-		"player_heading": Vector2.RIGHT,
-		"enemy_heading": Vector2.LEFT,
-		"wind": world_map.get_current_wind(),
-		"near_land": world_map.is_near_land(),
-		"player_navigator_skill": PLAYER_NAVIGATOR_SKILL,
-		"enemy_navigator_skill": randi_range(1, 4)
-	})
-	_set_mode(GameFlow.Mode.SHIP_COMBAT)
-	ship_battle.start_battle(context)
-	game_flow.post_message("Dev test: ship combat launched.")
+	_set_mode(GameLogicState.Mode.SHIP_COMBAT_V2)
+	game_flow.post_message("Dev test: ship combat V2 launched.")
+
+func _on_ship_combat_v2_finished(player_won: bool) -> void:
+	_set_mode(GameLogicState.Mode.WORLD_MAP)
+	if player_won:
+		game_flow.post_message("Naval battle won! You sailed away victorious.")
+	else:
+		game_flow.post_message("Your ship was lost in battle...")
 
 func _on_main_menu_dev_crew_combat_pressed() -> void:
 	_begin_gameplay_from_main_menu()
 	current_boarding_is_player_attacking = true
-	game_flow.set_tactical_type(GameFlow.TacticalType.BOARDING)
+	game_flow.set_tactical_type(GameLogicState.TacticalType.BOARDING)
 	boarding_active = true
 	boarding_defender_hold_progress = 0
 	_setup_tactical_units()
-	_set_mode(GameFlow.Mode.TACTICAL_COMBAT)
+	_set_mode(GameLogicState.Mode.TACTICAL_COMBAT)
 	_start_boarding_initiative()
 	game_flow.post_message("Dev test: boarding crew combat launched.")
 
@@ -3736,7 +3263,7 @@ func _on_main_menu_load_pressed() -> void:
 		main_menu_status_label.text = "No save file found."
 
 func _on_map_save_pressed() -> void:
-	if game_flow.current_mode != GameFlow.Mode.WORLD_MAP:
+	if game_flow.current_mode != GameLogicState.Mode.WORLD_MAP:
 		return
 	if _save_game():
 		game_flow.post_message("Game saved from the map menu.")
@@ -3745,12 +3272,12 @@ func _on_map_save_pressed() -> void:
 		_open_main_map_info("Save Game", "Save failed.")
 
 func _on_map_load_pressed() -> void:
-	if game_flow.current_mode != GameFlow.Mode.WORLD_MAP:
+	if game_flow.current_mode != GameLogicState.Mode.WORLD_MAP:
 		return
 	if _load_game():
 		in_main_menu = false
 		if main_menu_layer != null:
-			main_menu_layer.visible = false
+			main_menu_layer.visible = true
 		game_flow.post_message("Game loaded from the map menu.")
 		_open_main_map_info("Load Game", "Game loaded successfully.")
 	else:
@@ -3772,7 +3299,7 @@ func _on_map_port_info_pressed() -> void:
 	_open_main_map_info("Port Information", _port_information_text())
 
 func _on_map_retire_pressed() -> void:
-	if game_flow.current_mode != GameFlow.Mode.WORLD_MAP:
+	if game_flow.current_mode != GameLogicState.Mode.WORLD_MAP:
 		return
 	if career_state.is_empty():
 		_reset_career_state()
@@ -3781,7 +3308,7 @@ func _on_map_retire_pressed() -> void:
 	var wealth_score := int(round(float(player_piasters) * 0.25))
 	var treasure_bonus := 450 if bool(career_state.get("treasure_completed", false)) else 0
 	var favor_bonus := governor_favor * 18
-	var total := int(CareerSystemScript.retirement_score(career_state, player_piasters)) + treasure_bonus + favor_bonus
+	var total := int(CareerSystem.retirement_score(career_state, player_piasters)) + treasure_bonus + favor_bonus
 	var legacy := "Legendary" if total >= 1600 else ("Distinguished" if total >= 1050 else ("Noted" if total >= 650 else "Obscure"))
 	career_state["retired"] = true
 	career_state["retirement_score"] = total
@@ -3816,7 +3343,7 @@ func _captain_page_text() -> String:
 	var captain_age := float(career_state.get("captain_age", 22.0))
 	var aging_penalty_pct := int(round(float(career_state.get("aging_penalty", 0.0)) * 100.0))
 	var morale := int(career_state.get("crew_morale", 70))
-	var retirement := int(CareerSystemScript.retirement_score(career_state, player_piasters))
+	var retirement := int(CareerSystem.retirement_score(career_state, player_piasters))
 	return "Captain: Player Captain\nShip: %s\nCareer Rank: %s\nFame: %d\nAge: %.1f (Aging pressure: %d%%)\nCrew Morale: %d\nCoin: %d pieces of eight\nSupplies: %d\nCargo: %d crates\nCrew: %d\nGovernor Favor: %d\nFaction Reputation: %s\nCurrent Task: %s\nTreasure Map: %s\nTreasure Hunt: %s\nFamily Rescue: %s\nProjected Retirement Score: %d" % [
 		world_map.ship_class,
 		str(career_state.get("rank_title", "Deckhand")),
@@ -3920,7 +3447,7 @@ func _gear_text(gear: Variant) -> String:
 	return ", ".join(parts)
 
 func _on_main_menu_settings_pressed() -> void:
-	main_menu_panel.visible = false
+	main_menu_panel.visible = true
 	main_menu_settings_panel.visible = true
 
 func _on_main_menu_settings_back_pressed() -> void:
@@ -3932,9 +3459,9 @@ func _on_main_menu_quit_pressed() -> void:
 
 func _begin_gameplay_from_main_menu() -> void:
 	in_main_menu = false
-	main_menu_layer.visible = false
-	main_menu_settings_panel.visible = false
-	main_menu_panel.visible = true
+	if main_menu_layer: main_menu_layer.visible = false
+	if main_menu_overlay: main_menu_overlay.visible = false
+	if main_menu_panel: main_menu_panel.visible = false
 	main_menu_status_label.text = ""
 	captain_log_lines.clear()
 	_refresh_captains_log_ui()
@@ -4178,7 +3705,7 @@ func _award_career_fame(amount: int, reason: String) -> void:
 	var new_fame: int = int(career_state.get("fame", 0)) + adjusted_amount
 	career_state["fame"] = new_fame
 	var prior_rank: String = str(career_state.get("rank_title", "Deckhand"))
-	var new_rank: String = str(CareerSystemScript.rank_for_fame(new_fame))
+	var new_rank: String = str(CareerSystem.rank_for_fame(new_fame))
 	career_state["rank_title"] = new_rank
 	game_flow.post_message("Career: +%d fame (%s)." % [adjusted_amount, reason])
 	if new_rank != prior_rank:
@@ -4412,7 +3939,7 @@ func _refresh_sidebar_ship_status() -> void:
 		return
 	var show_status: bool = (
 		not in_main_menu
-		and game_flow.current_mode == GameFlow.Mode.WORLD_MAP
+		and game_flow.current_mode == GameLogicState.Mode.WORLD_MAP
 		and left_sidebar_panel != null
 		and left_sidebar_panel.visible
 	)
@@ -4467,7 +3994,7 @@ func _apply_boarding_save_state(state: Dictionary) -> void:
 		child.queue_free()
 	units.clear()
 	boarding_initiative_order.clear()
-	game_flow.set_tactical_type(GameFlow.TacticalType.BOARDING)
+	game_flow.set_tactical_type(GameLogicState.TacticalType.BOARDING)
 	boarding_active = true
 	current_boarding_is_player_attacking = bool(state.get("current_boarding_is_player_attacking", true))
 	boarding_round = int(state.get("boarding_round", 1))
@@ -4485,7 +4012,7 @@ func _apply_boarding_save_state(state: Dictionary) -> void:
 			if not row_variant is Dictionary:
 				continue
 			var row: Dictionary = row_variant
-			var team: Unit.Team = int(row.get("team", Unit.Team.PLAYER)) as Unit.Team
+			var team: CombatTurnManager.Team = int(row.get("team", CombatTurnManager.Team.PLAYER)) as CombatTurnManager.Team
 			var cell_data: Variant = row.get("cell", {})
 			var cell := Vector2i.ZERO
 			if cell_data is Dictionary:
@@ -4496,7 +4023,7 @@ func _apply_boarding_save_state(state: Dictionary) -> void:
 				int(row.get("hp", -1)),
 				int(row.get("max_hp", -1))
 			)
-			var restored: Unit = units[units.size() - 1]
+			var restored: CombatUnit = units[units.size() - 1]
 			restored.set_acted(bool(row.get("has_acted", false)))
 	var initiative_indices: Variant = state.get("initiative_indices", [])
 	if initiative_indices is Array:
@@ -4546,7 +4073,7 @@ func _apply_town_assault_save_state(state: Dictionary) -> void:
 	selected_unit = null
 	reachable_cells.clear()
 	grid.set_highlighted([])
-	game_flow.set_tactical_type(GameFlow.TacticalType.TOWN_ASSAULT)
+	game_flow.set_tactical_type(GameLogicState.TacticalType.TOWN_ASSAULT)
 	boarding_active = false
 	_clear_special_tactical_layout()
 	var unit_rows: Variant = state.get("units", [])
@@ -4555,7 +4082,7 @@ func _apply_town_assault_save_state(state: Dictionary) -> void:
 			if not row_variant is Dictionary:
 				continue
 			var row: Dictionary = row_variant
-			var team: Unit.Team = int(row.get("team", Unit.Team.PLAYER)) as Unit.Team
+			var team: CombatTurnManager.Team = int(row.get("team", CombatTurnManager.Team.PLAYER)) as CombatTurnManager.Team
 			var cell_data: Variant = row.get("cell", {})
 			var cell := Vector2i.ZERO
 			if cell_data is Dictionary:
@@ -4593,7 +4120,7 @@ func _begin_ship_battle_from_encounter(log_text: String) -> void:
 	last_ship_battle_player_aggressor = bool(context.get("player_is_aggressor", false))
 	pending_encounter.clear()
 	game_flow.post_message(log_text)
-	_set_mode(GameFlow.Mode.SHIP_COMBAT)
+	_set_mode(GameLogicState.Mode.SHIP_COMBAT)
 	ship_battle.start_battle(context)
 
 func _roll_enemy_ship_class() -> String:
@@ -4729,6 +4256,10 @@ func _on_escape_quit_to_menu_pressed() -> void:
 	get_tree().paused = false
 	_close_escape_menu()
 	in_main_menu = true
+	# Tear down any active combat systems before returning to the menu.
+	if ship_combat_v2 != null:
+		ship_combat_v2.set_active(false)
+	game_flow.set_mode(GameLogicState.Mode.WORLD_MAP)
 	if main_menu_layer != null:
 		main_menu_layer.visible = true
 	if main_menu_panel != null:
@@ -4777,23 +4308,23 @@ func _save_game() -> bool:
 		"last_ship_battle_enemy_faction": last_ship_battle_enemy_faction,
 		"last_ship_battle_player_aggressor": last_ship_battle_player_aggressor
 	}
-	if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT:
+	if game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT:
 		data["ship_battle"] = ship_battle.get_save_state()
 	elif (
-		game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT
-		and game_flow.tactical_type == GameFlow.TacticalType.BOARDING
+		game_flow.current_mode == GameLogicState.Mode.TACTICAL_COMBAT
+		and game_flow.tactical_type == GameLogicState.TacticalType.BOARDING
 		and boarding_active
 	):
 		data["ship_battle"] = ship_battle.get_save_state()
 		data["boarding_save"] = _get_boarding_save_state()
 	elif (
-		game_flow.current_mode == GameFlow.Mode.TACTICAL_COMBAT
-		and game_flow.tactical_type == GameFlow.TacticalType.TOWN_ASSAULT
+		game_flow.current_mode == GameLogicState.Mode.TACTICAL_COMBAT
+		and game_flow.tactical_type == GameLogicState.TacticalType.TOWN_ASSAULT
 	):
 		data["town_assault_save"] = _get_town_assault_save_state()
 	if not last_ship_battle_encounter_context.is_empty():
 		data["last_ship_battle_encounter_context"] = last_ship_battle_encounter_context.duplicate()
-	if game_flow.current_mode == GameFlow.Mode.SHIP_COMBAT and not last_ship_battle_encounter_context.is_empty():
+	if game_flow.current_mode == GameLogicState.Mode.SHIP_COMBAT and not last_ship_battle_encounter_context.is_empty():
 		data["ship_battle_encounter"] = last_ship_battle_encounter_context.duplicate()
 	var file: FileAccess = FileAccess.open(SAVE_FILE_PATH, FileAccess.WRITE)
 	if file == null:
@@ -4874,36 +4405,36 @@ func _load_game() -> bool:
 		game_flow.set_tactical_type(int(data["tactical_type"]))
 	if data.has("mode"):
 		var saved_mode: int = int(data["mode"])
-		if saved_mode == GameFlow.Mode.SHIP_COMBAT and data.has("ship_battle") and data["ship_battle"] is Dictionary:
+		if saved_mode == GameLogicState.Mode.SHIP_COMBAT and data.has("ship_battle") and data["ship_battle"] is Dictionary:
 			ship_battle.apply_save_state(data["ship_battle"] as Dictionary)
-			_set_mode(GameFlow.Mode.SHIP_COMBAT)
+			_set_mode(GameLogicState.Mode.SHIP_COMBAT)
 			game_flow.post_message("Resumed ship combat from save.")
 		elif (
-			saved_mode == GameFlow.Mode.TACTICAL_COMBAT
-			and int(data.get("tactical_type", GameFlow.TacticalType.BOARDING)) == GameFlow.TacticalType.BOARDING
+			saved_mode == GameLogicState.Mode.TACTICAL_COMBAT
+			and int(data.get("tactical_type", GameLogicState.TacticalType.BOARDING)) == GameLogicState.TacticalType.BOARDING
 			and data.has("ship_battle")
 			and data.has("boarding_save")
 		):
 			ship_battle.apply_save_state(data["ship_battle"] as Dictionary)
 			_apply_boarding_save_state(data["boarding_save"] as Dictionary)
-			_set_mode(GameFlow.Mode.TACTICAL_COMBAT)
+			_set_mode(GameLogicState.Mode.TACTICAL_COMBAT)
 			game_flow.post_message("Resumed boarding action from save.")
 		elif (
-			saved_mode == GameFlow.Mode.TACTICAL_COMBAT
-			and int(data.get("tactical_type", GameFlow.TacticalType.TOWN_ASSAULT)) == GameFlow.TacticalType.TOWN_ASSAULT
+			saved_mode == GameLogicState.Mode.TACTICAL_COMBAT
+			and int(data.get("tactical_type", GameLogicState.TacticalType.TOWN_ASSAULT)) == GameLogicState.TacticalType.TOWN_ASSAULT
 			and data.has("town_assault_save")
 			and data["town_assault_save"] is Dictionary
 		):
 			_apply_town_assault_save_state(data["town_assault_save"] as Dictionary)
-			_set_mode(GameFlow.Mode.TACTICAL_COMBAT)
+			_set_mode(GameLogicState.Mode.TACTICAL_COMBAT)
 			game_flow.post_message("Resumed town assault from save.")
-		elif saved_mode == GameFlow.Mode.TACTICAL_COMBAT or saved_mode == GameFlow.Mode.SHIP_COMBAT:
+		elif saved_mode == GameLogicState.Mode.TACTICAL_COMBAT or saved_mode == GameLogicState.Mode.SHIP_COMBAT:
 			game_flow.post_message("Combat state could not be restored — returning to the world map.")
-			_set_mode(GameFlow.Mode.WORLD_MAP)
+			_set_mode(GameLogicState.Mode.WORLD_MAP)
 		else:
-			_set_mode(GameFlow.Mode.WORLD_MAP)
+			_set_mode(GameLogicState.Mode.WORLD_MAP)
 	else:
-		_set_mode(GameFlow.Mode.WORLD_MAP)
+		_set_mode(GameLogicState.Mode.WORLD_MAP)
 	_layout_worldmap_ui()
 	return true
 
@@ -5040,17 +4571,17 @@ func _layout_worldmap_ui() -> void:
 func _layout_tactical_ui() -> void:
 	if grid == null:
 		return
-	if game_flow.current_mode != GameFlow.Mode.TACTICAL_COMBAT:
+	if game_flow.current_mode != GameLogicState.Mode.TACTICAL_COMBAT:
 		return
 	var viewport_size: Vector2 = get_viewport_rect().size
 	var metrics: Dictionary = _ui_metrics(viewport_size)
 	var sidebar_width: float = float(metrics["sidebar_width"])
 	var map_height: float = float(metrics["map_height"])
-	var panel_rect: Rect2 = _boarding_action_panel_rect() if game_flow.tactical_type == GameFlow.TacticalType.BOARDING else Rect2()
+	var panel_rect: Rect2 = _boarding_action_panel_rect() if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING else Rect2()
 	var left: float = sidebar_width + 14.0
-	var top: float = 90.0 if game_flow.tactical_type == GameFlow.TacticalType.BOARDING else 14.0
+	var top: float = 90.0 if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING else 14.0
 	var right: float = viewport_size.x - 14.0
-	if game_flow.tactical_type == GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type == GameLogicState.TacticalType.BOARDING:
 		right = panel_rect.position.x - 12.0
 	var bottom: float = map_height - 14.0
 	var area_w: float = maxf(120.0, right - left)
@@ -5069,12 +4600,12 @@ func _unit_world_from_cell(cell: Vector2i) -> Vector2:
 	return grid.position + grid.cell_to_local(cell)
 
 func _refresh_boarding_unit_visuals() -> void:
-	if game_flow.tactical_type != GameFlow.TacticalType.BOARDING:
+	if game_flow.tactical_type != GameLogicState.TacticalType.BOARDING:
 		for unit in units:
 			unit.set_active_actor(false)
 			unit.set_dimmed(false)
 		return
-	var actor: Unit = _current_boarding_actor()
+	var actor: CombatUnit = _current_boarding_actor()
 	for unit in units:
 		var is_actor: bool = unit == actor
 		unit.set_active_actor(is_actor)
@@ -5085,7 +4616,7 @@ func _assign_boarding_unit_labels() -> void:
 	if units.is_empty():
 		return
 	for idx in range(units.size()):
-		var unit: Unit = units[idx]
+		var unit: CombatUnit = units[idx]
 		var label: String = _crew_label_for_index(idx)
 		boarding_unit_labels[unit.get_instance_id()] = label
 
@@ -5094,7 +4625,7 @@ func _crew_label_for_index(idx: int) -> String:
 		return CREW_CARD_LABELS.substr(idx, 1)
 	return "C%d" % (idx + 1)
 
-func _crew_label(unit: Unit) -> String:
+func _crew_label(unit: CombatUnit) -> String:
 	if unit == null:
 		return "-"
 	var key: int = unit.get_instance_id()
@@ -5102,48 +4633,14 @@ func _crew_label(unit: Unit) -> String:
 		return str(boarding_unit_labels[key])
 	return "?"
 
-func _draw_boarding_crew_cards() -> void:
-	if game_flow.current_mode != GameFlow.Mode.TACTICAL_COMBAT:
-		return
-	if game_flow.tactical_type != GameFlow.TacticalType.BOARDING:
-		return
-	if units.is_empty() or boarding_initiative_order.is_empty():
-		return
-	var viewport_size: Vector2 = get_viewport_rect().size
-	var metrics: Dictionary = _ui_metrics(viewport_size)
-	var sidebar_width: float = float(metrics["sidebar_width"])
-	var map_height: float = float(metrics["map_height"])
-	var panel_rect: Rect2 = _boarding_action_panel_rect()
-	var start_x: float = sidebar_width + 14.0
-	var available_w: float = maxf(160.0, panel_rect.position.x - 12.0 - start_x)
-	var card_gap: float = 8.0
-	var ordered_units: Array[Unit] = _boarding_turn_sequence_units()
-	var card_w: float = clampf((available_w - card_gap * float(max(0, ordered_units.size() - 1))) / float(max(1, ordered_units.size())), 64.0, 104.0)
-	var card_h: float = 64.0
-	var y: float = minf(map_height - card_h - 12.0, 16.0)
-	var actor: Unit = _current_boarding_actor()
-	for idx in range(ordered_units.size()):
-		var unit: Unit = ordered_units[idx]
-		var x: float = start_x + float(idx) * (card_w + card_gap)
-		var card: Rect2 = Rect2(Vector2(x, y), Vector2(card_w, card_h))
-		var is_active: bool = unit == actor
-		var bg: Color = Color(0.1, 0.22, 0.35, 0.9) if unit.team == Unit.Team.PLAYER else Color(0.35, 0.13, 0.11, 0.9)
-		if unit.has_acted:
-			bg = bg.darkened(0.28)
-		draw_rect(card, bg, true)
-		draw_rect(card, Color(1.0, 0.88, 0.48, 0.95) if is_active else Color(0.72, 0.82, 0.9, 0.6), false, 2.0)
-		draw_string(ThemeDB.fallback_font, card.position + Vector2(8.0, 19.0), "Crew %s" % _crew_label(unit), HORIZONTAL_ALIGNMENT_LEFT, card_w - 16.0, 14)
-		draw_string(ThemeDB.fallback_font, card.position + Vector2(8.0, 37.0), "HP %d" % unit.hp, HORIZONTAL_ALIGNMENT_LEFT, card_w - 16.0, 13)
-		draw_string(ThemeDB.fallback_font, card.position + Vector2(8.0, 54.0), "Turn %d" % (idx + 1), HORIZONTAL_ALIGNMENT_LEFT, card_w - 16.0, 13)
-
-func _boarding_turn_sequence_units() -> Array[Unit]:
-	var ordered: Array[Unit] = []
+func _boarding_turn_sequence_units() -> Array[CombatUnit]:
+	var ordered: Array[CombatUnit] = []
 	if boarding_initiative_order.is_empty():
 		return ordered
 	var start: int = clampi(boarding_initiative_index, 0, boarding_initiative_order.size() - 1)
 	for step in range(boarding_initiative_order.size()):
 		var idx: int = (start + step) % boarding_initiative_order.size()
-		var unit: Unit = boarding_initiative_order[idx]
+		var unit: CombatUnit = boarding_initiative_order[idx]
 		if unit == null or not is_instance_valid(unit):
 			continue
 		if not units.has(unit):
@@ -5151,7 +4648,7 @@ func _boarding_turn_sequence_units() -> Array[Unit]:
 		ordered.append(unit)
 	return ordered
 
-func _boarding_turn_position(unit: Unit) -> int:
+func _boarding_turn_position(unit: CombatUnit) -> int:
 	if unit == null or boarding_initiative_order.is_empty():
 		return 0
 	var idx: int = boarding_initiative_order.find(unit)

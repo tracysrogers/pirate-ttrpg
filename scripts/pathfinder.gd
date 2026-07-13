@@ -14,7 +14,7 @@ static func reachable_cells(
 		Vector2i.DOWN
 	]
 	var open: Array[Vector2i] = [start]
-	var visited := {start: 0}
+	var visited: Dictionary = {start: 0}
 	var reachable: Array[Vector2i] = []
 
 	while not open.is_empty():
